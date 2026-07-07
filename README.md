@@ -121,11 +121,15 @@ Do this once, before letting real patients in:
 
 1. **Log into the admin console** → **http://localhost/his** → enter your `ADMIN_PASSCODE` and **your
    name** (your name is recorded on every change you make — this is deliberate, for accountability).
+   > **What's the passcode?** There is no factory default — your admin passcode is simply the
+   > `ADMIN_PASSCODE` value you put in `.env` (set a strong one with `node scripts/gen-secrets.js`;
+   > it must be at least 6 characters). To change it later, edit `.env` and restart the backend.
 2. **Create your departments** (HIS → Departments) — e.g. Cardiology, General Medicine, whatever your
    OPD runs. Set each one's icon and whether it collects vitals. (A generic *General OPD* is
    pre-created as a starting point; edit or deactivate it as you like.)
-3. **Create your doctors** (HIS → Doctors) — each gets a **unique login PIN**. Tell each doctor to
-   change their PIN on first login.
+3. **Create your doctors** (HIS → Doctors) — you set each doctor's **login PIN** here when you create
+   them. That PIN (together with the doctor's phone number) is what they type at the doctor dashboard
+   — there is no default PIN. Tell each doctor to change their PIN on first login.
 4. **Set your hospital identity** — put your real `HOSPITAL_ID` and `HOSPITAL_NAME` in `.env`.
 5. **Print the QR poster** — run `node scripts/generate-qr.js https://your-domain` (or open
    `scripts/qr-poster.html`) and place it where patients check in.
@@ -142,6 +146,12 @@ Locally these are all under `http://localhost` (in production, your HTTPS domain
 | Admin console (HIS) | `http://localhost/his` | Admin (passcode + name) |
 | Prescription verify | `http://localhost/rx/verify?d=…` | Pharmacy (by scanning the slip QR) |
 | File storage console | `http://localhost:9001` | IT only (MinIO login) |
+
+**Where each login comes from** (none of these are hardcoded defaults — they all come from *your* setup):
+- **Admin console** — the `ADMIN_PASSCODE` you set in `.env`, plus your name (for the audit trail).
+- **Doctor dashboard** — the doctor's phone number + the PIN you set for that doctor in the admin console.
+- **Patient intake** — `<HOSPITAL_ID>` is the `HOSPITAL_ID` value from your `.env`.
+- **File storage console** — the `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` from your `.env` (IT only).
 
 ## Production deployment
 A production topology with automatic HTTPS is included.
