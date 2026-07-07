@@ -1,0 +1,140 @@
+version: '3.8'
+
+networks:
+  opd-net:
+    driver: bridge
+
+volumes:
+  pg-data:
+  redis-data:
+  minio-data:
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-opd_preconsult}
+      POSTGRES_USER: ${POSTGRES_USER:-opd_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme_in_production}
+    ports:
+      # Bound to loopback: reachable for local dev tools, NOT exposed on the
+      # network. Production (docker-compose.prod.yml) publishes no infra ports.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./db/migrations:/docker-entrypoint-initdb.d/migrations
+      - ./db/init.sh:/docker-entrypoint-initdb.d/99-init.sh
+    networks:
+      - opd-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-opd_user} -d ${POSTGRES_DB:-opd_preconsult}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - opd-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-changeme_in_production}
+      # Encryption at rest (B1): empty in dev (KMS disabled). Set MINIO_KMS_SECRET_KEY
+      # in .env (see scripts/gen-secrets.js) to encrypt uploaded PHI at rest; the
+      # python-backend then turns on the bucket's default SSE-S3 (storage.py).
+      MINIO_KMS_SECRET_KEY: ${MINIO_KMS_SECRET_KEY:-}
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - minio-data:/data
+    networks:
+      - opd-net
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  gateway:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./services/gateway/nginx.conf:/etc/nginx/conf.d/default.conf
+    depends_on:
+      node-backend:
+        condition: service_healthy
+      python-backend:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+    networks:
+      - opd-net
+
+  node-backend:
+    build: ./services/node-backend
+    ports:
+      - "127.0.0.1:4001:4001"
+    env_file: .env
+    environment:
+      PORT: 4001
+      NODE_ENV: development
+      MIGRATIONS_DIR: /migrations
+    volumes:
+      # Auto-apply pending DB migrations on startup (see src/migrate.js).
+      - ./db/migrations:/migrations:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - opd-net
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:4001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  python-backend:
+    build: ./services/python-backend
+    ports:
+      - "127.0.0.1:4002:4002"
+    env_file: .env
+    environment:
+      PORT: 4002
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - opd-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4002/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      NEXT_PUBLIC_API_BASE: ""
+    networks:
+      - opd-net
