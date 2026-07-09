@@ -85,11 +85,33 @@ node scripts/gen-secrets.js
 docker compose up --build
 ```
 When it finishes, open **http://localhost/?h=hospital_01** for the patient flow. The system ships
-with a single **General OPD** department and **no doctors** — create your real doctors in the admin
-console first (see [First-time hospital setup](#first-time-hospital-setup)).
+with **no departments and no doctors** — a placeholder department would appear in the patient-facing
+picker and issue real queue tokens, so you create your own first (see
+[First-time hospital setup](#first-time-hospital-setup)). Adding a department in the admin console
+automatically seeds its base intake questions.
 
 > Code changes need a **rebuild**, not just a restart:
 > `docker compose build <service> && docker compose up -d <service> && docker compose restart gateway`
+
+### After pulling a change that adds a database migration
+
+`migrate.js` applies pending migrations from `db/migrations/` on startup — but the SQL files are
+**baked into the node-backend image at build time**. `docker compose restart node-backend` re-runs the
+*old* image, so the migration silently never applies and you are left wondering why nothing changed.
+Any pull that adds a file under `db/migrations/` needs:
+
+```bash
+docker compose build node-backend
+docker compose up -d node-backend
+docker compose restart gateway     # drops stale upstream IPs, avoids 502s
+```
+
+Confirm it landed:
+
+```bash
+docker compose exec postgres psql -U opd_user -d opd_preconsult \
+  -c "SELECT filename FROM schema_migrations ORDER BY filename DESC LIMIT 3;"
+```
 
 ---
 
@@ -134,8 +156,9 @@ Do this once, before letting real patients in:
    > `ADMIN_PASSCODE` value you put in `.env` (set a strong one with `node scripts/gen-secrets.js`;
    > it must be at least 6 characters). To change it later, edit `.env` and restart the backend.
 2. **Create your departments** (HIS → Departments) — e.g. Cardiology, General Medicine, whatever your
-   OPD runs. Set each one's icon and whether it collects vitals. (A generic *General OPD* is
-   pre-created as a starting point; edit or deactivate it as you like.)
+   OPD runs. Set each one's icon and whether it collects vitals. The list starts **empty**; creating a
+   department automatically seeds its base intake questions, which you then extend in HIS →
+   Questionnaires. Until at least one department exists, patients cannot check in.
 3. **Create your doctors** (HIS → Doctors) — you set each doctor's **login PIN** here when you create
    them. That PIN (together with the doctor's phone number) is what they type at the doctor dashboard
    — there is no default PIN. Tell each doctor to change their PIN on first login.
