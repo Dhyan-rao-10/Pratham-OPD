@@ -102,8 +102,13 @@ async function seedQuestionnaires() {
 
     // 2) Department-specific DAG questions from seed files — ONLY for departments
     //    that actually exist, so a blank install never resurrects demo content.
-    //    The starter ships one file for the neutral OPD department.
-    const seedFiles = { OPD: 'opd.json' };
+    //
+    //    There are no starter seed files: a hospital adds its own departments in
+    //    HIS → Departments (which seeds that department's base questions via
+    //    baseNodesForDept) and then authors its DAG questions in the Questionnaires
+    //    tab. Drop a `<code>.json` in seed/ and add it here only if you want a
+    //    department pre-populated for a specific deployment.
+    const seedFiles = {};
     for (const [code, file] of Object.entries(seedFiles)) {
       if (!deptCodes.includes(code)) continue;
       const filePath = path.join(__dirname, 'seed', file);
