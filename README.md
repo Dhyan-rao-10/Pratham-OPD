@@ -22,8 +22,11 @@ prioritisation, digital prescriptions with a tamper-proof QR, and an admin conso
 7. [The links (URLs)](#the-links-urls)
 8. [Production deployment](#production-deployment)
 9. [Optional integrations](#optional-integrations)
-10. [Project structure](#project-structure)
-11. [Operations & staff training](#operations--staff-training)
+10. [PWA (installable web app)](#pwa-installable-web-app)
+11. [Accessibility & design tokens](#accessibility--design-tokens)
+12. [Patient AI notice](#patient-ai-notice)
+13. [Project structure](#project-structure)
+14. [Operations & staff training](#operations--staff-training)
 
 ---
 
@@ -63,6 +66,12 @@ Six containers behind one gateway (started together with Docker Compose):
 - **Docker Desktop** (includes Docker Compose) — this is all you need to run the whole system.
 - **Node.js** — only if you want to run the helper scripts (secret generator, QR poster).
 - A machine with ~4 GB free RAM for the containers.
+- **Network access at image-build time.** The frontend loads Noto Sans, Noto Sans
+  Devanagari and Noto Sans Telugu through `next/font/google`, which downloads them
+  during `next build` and emits self-hosted `.woff2` files. Nothing is fetched from
+  Google at runtime — that keeps patient IPs off a third party and lets the app work
+  on a firewalled hospital LAN. A fully air-gapped *build* would need
+  `next/font/local` with the fonts vendored into the repo.
 
 ## Quick start (local)
 ```bash
@@ -190,6 +199,114 @@ All of the below are optional — the app degrades gracefully without them:
   per-department queue-token counter resets at local midnight in this zone, so tokens roll over at
   12 am hospital time regardless of the server's own timezone. Change it only if you deploy outside
   IST.
+
+## PWA (installable web app)
+
+The frontend ships a web app manifest (`frontend/src/app/manifest.js`, served at
+`/manifest.webmanifest`) plus icons in `frontend/public/icons/`. That makes the app
+installable to a phone/tablet home screen or a kiosk, launching without browser
+chrome (`display: standalone`), with the right icon and status-bar colour.
+
+Most useful for the **doctor dashboard on a phone** and the **waiting-room board**
+(`/queue` on a wall display). Patients scan a QR for a single visit, so they will
+rarely install — but nothing breaks if they do: `start_url: "/"` drops the QR's
+`?h=<hospital_id>` and `parseEntry()` falls back to `NEXT_PUBLIC_HOSPITAL_ID`.
+
+Icons are committed. Regenerate only if the mark or brand colour changes:
+
+```bash
+cd frontend && npm run gen:icons
+```
+
+> ### ⚠️ There is deliberately NO service worker. Do not add one casually.
+>
+> A manifest is inert metadata — it cannot intercept requests or cache anything.
+> A **service worker** can, and in this app that is a clinical-safety and DPDP
+> problem, not a performance win:
+>
+> - **PHI on disk.** `/doctor`, `/his` and the patient pages return names, phone
+>   numbers and diagnoses. A caching SW writes those into Cache Storage on the
+>   device, surviving logout, on a possibly shared hospital phone.
+> - **Stale clinical data.** Offline-first would show a doctor a cached report or
+>   triage level that is no longer current. Decision-support UI must never
+>   silently serve stale clinical state.
+> - **Stale bundles.** Images bake the source at build time, so "rebuild, don't
+>   restart" is already the rule. A SW caching JS means clinicians keep running old
+>   code after a deploy — the bug you cannot debug remotely.
+>
+> Without a service worker Chrome will **not** show an "Install app" prompt (it
+> requires a SW with a fetch handler). iOS *Add to Home Screen* works regardless.
+> If a real install prompt is required later, scope the SW to the app shell and
+> static assets only, **never `/api/*`**, with a cache key tied to the build id.
+
+Note: `next.config.js` sets `output: 'standalone'`, which does **not** bundle
+`public/`. Both `frontend/Dockerfile` and the root `Dockerfile` copy it explicitly.
+Remove those lines and every icon 404s.
+
+## Accessibility & design tokens
+
+The UI targets **WCAG 2.1 Level AA**. For a government-hospital deployment that is
+reachable through GIGW 3.0 and IS 17802, which hang off the Rights of Persons with
+Disabilities Act 2016.
+
+All colour lives in CSS custom properties in `frontend/src/app/globals.css`. Each
+token is pinned to a contrast threshold against the surfaces it is actually drawn
+on, and several sit within `0.15` of their floor — so an innocent-looking retint
+can silently drop a triage badge or a destructive button below AA.
+
+A checked-in script guards this:
+
+```bash
+cd frontend
+npm run check:contrast     # asserts all 22 token pairs vs WCAG 2.1 AA; exits 1 on failure
+npm run verify             # check:contrast, then next build
+```
+
+If it fails, darken the foreground or lighten the surface — **do not relax the
+threshold in the script.** When you add a semantic colour, add its pair to
+`frontend/scripts/check-contrast.mjs`. Note the script validates the *palette*, not
+how tokens are used at call sites: using a light surface token (`--accent`) as text
+still fails in the browser while the gate stays green.
+
+Conventions worth knowing before touching the UI:
+
+- **Text scales, pages don't zoom.** Every inline `fontSize` in `doctor/page.jsx`
+  and `his/page.jsx` is written `calc(Npx * var(--fs))`. `A11yProvider` drives
+  `--fs` (patient flow: `A / A+ / A++`; dashboards: `100–150%`). A new hardcoded
+  `fontSize: 13` will silently ignore the text-size control. Page zoom is not an
+  option — the doctor shell is `height: 100vh; overflow: hidden` and would clip.
+- **Amber is a light swatch.** It pairs with `--amber-on` (dark ink), never white
+  (1.93:1). For amber *text* on a light surface use `--amber-text`; on a pale amber
+  chip use `--amber-on-tint`. Same split for `--green` / `--green-on-tint`.
+- **Modals go through `components/ui/`.** Use `useConfirm()` for confirmations and
+  `<Modal>` (or the `useDialogA11y` hook) for content dialogs. Both supply
+  `role="dialog"`, `aria-modal`, a focus trap, Escape, and focus restore. Do not
+  hand-roll another `position: fixed; inset: 0` overlay.
+- **Fonts come from `next/font/google`** in `app/layout.jsx`, self-hosted at build
+  time. Never reintroduce an `@import` from `fonts.googleapis.com` — it leaks
+  patient IPs and breaks on a firewalled LAN. Devanagari and Telugu need their own
+  families; plain `Noto Sans` has no glyphs for either.
+- **Never render triage on the public queue board.** `GET /api/queue/board` is
+  unauthenticated and deliberately does not return `triage_level` — a token is
+  de-anonymised the moment it is called, so per-token acuity would disclose a
+  patient's clinical status to the whole waiting room (DPDP Act 2023). Triage stays
+  in the `ORDER BY` so urgent cases are still called first.
+
+## Patient AI notice
+
+A one-time notice on the **consent page only** (`ai_notice_title` / `ai_notice_body`
+in en/hi/te). It states what AI actually does here — speech-to-text, translation,
+reading uploaded documents, drafting the doctor's summary — and that **AI does not
+decide urgency and does not diagnose.**
+
+That last part is literally true and must stay true. `sessions.triage_level` has
+exactly three writers, all deterministic and escalate-only: `routes/questionnaire.js`
+and `routes/whatsapp.js` (admin-authored `triage_flag` on a question node) and
+`routers/triage.py` (hardcoded symptom/vitals rules). **No LLM writes triage.**
+`routers/llm.py` parses a `TRIAGE_FLAG` out of model output but only returns it, and
+`/api/llm/interview` is currently called by nothing. Wiring that endpoint up would
+make an LLM an input to patient acuity — get a human decision first, because it
+changes the regulatory posture (SaMD) and invalidates the notice above.
 
 ## Project structure
 ```
