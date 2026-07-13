@@ -7,13 +7,20 @@ All under /api/drugs, which nginx already routes to python-backend (no nginx cha
 """
 from typing import List, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from .. import drug_repo
+from ..auth import require_role
 from ..drug_data import SORTED_GENERICS
 
 router = APIRouter(prefix="/api/drugs", tags=["drugs"])
+
+# The router is already gated to doctor+admin in main.py (doctors need GET /api/drugs
+# for the prescribe-tab autocomplete). Everything that MUTATES the curated formulary
+# or triages AI findings is admin-only: a doctor — let alone a patient token — must
+# not be able to delete an interaction rule such as warfarin x aspirin.
+admin_only = [Depends(require_role("admin"))]
 
 
 @router.get("")
@@ -63,17 +70,17 @@ class ApproveIn(BaseModel):
 
 # ── Admin: drugs ──────────────────────────────────────────────────────────────
 
-@router.get("/admin/drugs")
+@router.get("/admin/drugs", dependencies=admin_only)
 def admin_list_drugs():
     return drug_repo.list_drugs()
 
 
-@router.post("/admin/drugs")
+@router.post("/admin/drugs", dependencies=admin_only)
 def admin_upsert_drug(body: DrugIn):
     return drug_repo.upsert_drug(body.generic, body.classes, body.aliases)
 
 
-@router.delete("/admin/drugs")
+@router.delete("/admin/drugs", dependencies=admin_only)
 def admin_delete_drug(generic: str):
     drug_repo.delete_drug(generic)
     return {"ok": True}
@@ -81,17 +88,17 @@ def admin_delete_drug(generic: str):
 
 # ── Admin: specific interactions ──────────────────────────────────────────────
 
-@router.get("/admin/interactions")
+@router.get("/admin/interactions", dependencies=admin_only)
 def admin_list_interactions():
     return drug_repo.list_interactions()
 
 
-@router.post("/admin/interactions")
+@router.post("/admin/interactions", dependencies=admin_only)
 def admin_upsert_interaction(body: InteractionIn):
     return drug_repo.upsert_interaction(body.generic_a, body.generic_b, body.severity, body.description)
 
 
-@router.delete("/admin/interactions/{row_id}")
+@router.delete("/admin/interactions/{row_id}", dependencies=admin_only)
 def admin_delete_interaction(row_id: str):
     drug_repo.delete_interaction(row_id)
     return {"ok": True}
@@ -99,17 +106,17 @@ def admin_delete_interaction(row_id: str):
 
 # ── Admin: class interactions ─────────────────────────────────────────────────
 
-@router.get("/admin/class-interactions")
+@router.get("/admin/class-interactions", dependencies=admin_only)
 def admin_list_class_interactions():
     return drug_repo.list_class_interactions()
 
 
-@router.post("/admin/class-interactions")
+@router.post("/admin/class-interactions", dependencies=admin_only)
 def admin_upsert_class_interaction(body: ClassInteractionIn):
     return drug_repo.upsert_class_interaction(body.class_a, body.class_b, body.severity, body.description)
 
 
-@router.delete("/admin/class-interactions/{row_id}")
+@router.delete("/admin/class-interactions/{row_id}", dependencies=admin_only)
 def admin_delete_class_interaction(row_id: str):
     drug_repo.delete_class_interaction(row_id)
     return {"ok": True}
@@ -117,17 +124,17 @@ def admin_delete_class_interaction(row_id: str):
 
 # ── Admin: allergy map ────────────────────────────────────────────────────────
 
-@router.get("/admin/allergy-map")
+@router.get("/admin/allergy-map", dependencies=admin_only)
 def admin_list_allergy_map():
     return drug_repo.list_allergy_map()
 
 
-@router.post("/admin/allergy-map")
+@router.post("/admin/allergy-map", dependencies=admin_only)
 def admin_upsert_allergy_map(body: AllergyMapIn):
     return drug_repo.upsert_allergy_map(body.allergen, body.drug_class)
 
 
-@router.delete("/admin/allergy-map/{row_id}")
+@router.delete("/admin/allergy-map/{row_id}", dependencies=admin_only)
 def admin_delete_allergy_map(row_id: str):
     drug_repo.delete_allergy_map(row_id)
     return {"ok": True}
@@ -135,18 +142,18 @@ def admin_delete_allergy_map(row_id: str):
 
 # ── Review queue (AI findings → admin curation) ───────────────────────────────
 
-@router.get("/review-queue")
+@router.get("/review-queue", dependencies=admin_only)
 def review_queue(status: str = "pending"):
     return drug_repo.list_queue(status)
 
 
-@router.post("/review-queue/{row_id}/approve")
+@router.post("/review-queue/{row_id}/approve", dependencies=admin_only)
 def review_approve(row_id: str, body: ApproveIn):
     result = drug_repo.approve(row_id, body.severity, body.description)
     return {"ok": result is not None, "approved": result}
 
 
-@router.post("/review-queue/{row_id}/dismiss")
+@router.post("/review-queue/{row_id}/dismiss", dependencies=admin_only)
 def review_dismiss(row_id: str):
     drug_repo.dismiss(row_id)
     return {"ok": True}

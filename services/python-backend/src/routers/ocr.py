@@ -11,7 +11,7 @@ import pytesseract
 
 from ..db import execute, query
 from .. import storage
-from ..auth import require_auth
+from ..auth import require_auth, assert_session_access
 from ..llm_client import complete_with_image, has_llm, has_vision
 from ..drug_data import normalize_drug_name, GENERIC_DRUGS, SORTED_GENERICS
 
@@ -268,14 +268,18 @@ def extract_with_vision(image_bytes: bytes, mime_type: str, ocr_text: str, ocr_c
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
-@router.post("/process", dependencies=[Depends(require_auth)])
+@router.post("/process")
 async def process_document(
     file: UploadFile = File(...),
     session_id: Optional[str] = Form(default=None),
     lang: Optional[str] = Form(default="eng"),
     doc_label: Optional[str] = Form(default=None),
+    claims: dict = Depends(require_auth),
 ):
     """Process an uploaded document image or PDF with AI vision + Tesseract fallback."""
+    # A document is attached to a session — only its owner (or clinical staff) may.
+    if session_id:
+        assert_session_access(session_id, claims)
     contents = await file.read()
 
     # Guard: reject oversized uploads before loading them into memory.
@@ -407,17 +411,25 @@ async def process_document(
     }
 
 
-@router.post("/confirm/{doc_id}", dependencies=[Depends(require_auth)])
-async def confirm_document(doc_id: str, body: dict = {}):
+@router.post("/confirm/{doc_id}")
+async def confirm_document(doc_id: str, body: dict = {}, claims: dict = Depends(require_auth)):
     """Patient confirms or rejects OCR output."""
+    # Resolve the document's owning session before authorizing the write, so a
+    # patient can only confirm documents attached to their own session.
+    rows = query("SELECT session_id FROM session_documents WHERE id = %s", (doc_id,))
+    if not rows:
+        raise HTTPException(status_code=404, detail="Document not found")
+    assert_session_access(str(rows[0]["session_id"]), claims)
+
     confirmed = body.get('confirmed', True)
     execute("UPDATE session_documents SET patient_confirmed = %s WHERE id = %s", (confirmed, doc_id))
     return {'confirmed': confirmed}
 
 
-@router.get("/documents/{session_id}", dependencies=[Depends(require_auth)])
-async def get_documents(session_id: str):
+@router.get("/documents/{session_id}")
+async def get_documents(session_id: str, claims: dict = Depends(require_auth)):
     """Get all documents for a session."""
+    assert_session_access(session_id, claims)
     return query(
         "SELECT * FROM session_documents WHERE session_id = %s ORDER BY created_at",
         (session_id,),

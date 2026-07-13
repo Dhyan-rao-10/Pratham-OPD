@@ -1,11 +1,13 @@
 const { Router } = require('express');
 const pool = require('../models/db');
 const { authMiddleware } = require('../middleware/auth');
+const { requireSessionAccess } = require('../middleware/ownership');
 
 const router = Router();
 
-// Submit vitals
-router.post('/:session_id', authMiddleware, async (req, res) => {
+// Submit vitals. The :session_id is authorized against the caller's token — a
+// patient may only write their own; a nurse/doctor may write any (late vitals).
+router.post('/:session_id', authMiddleware, requireSessionAccess(), async (req, res) => {
   try {
     const { session_id } = req.params;
     const { bp_systolic, bp_diastolic, bp_side, weight_kg, spo2_pct, heart_rate, temperature_c, source } = req.body;
@@ -33,7 +35,7 @@ router.post('/:session_id', authMiddleware, async (req, res) => {
 });
 
 // Get vitals for session
-router.get('/:session_id', async (req, res) => {
+router.get('/:session_id', authMiddleware, requireSessionAccess(), async (req, res) => {
   try {
     const result = await pool.query(
       'SELECT * FROM session_vitals WHERE session_id = $1 ORDER BY recorded_at DESC LIMIT 1',

@@ -1,6 +1,7 @@
 const { Router } = require('express');
 const pool = require('../models/db');
-const { signToken, authMiddleware } = require('../middleware/auth');
+const { signToken, authMiddleware, requireRole } = require('../middleware/auth');
+const { requireSessionAccess } = require('../middleware/ownership');
 const { normalizeIndianPhone } = require('../utils/phone');
 const { APP_TIMEZONE } = require('../utils/time');
 
@@ -260,8 +261,8 @@ router.post('/state', authMiddleware, async (req, res) => {
   }
 });
 
-// Get session by ID
-router.get('/:id', async (req, res) => {
+// Get session by ID — the patient's own session, or any session for clinical staff.
+router.get('/:id', authMiddleware, requireSessionAccess('id'), async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT s.*, COALESCE(d.collect_vitals, true) AS collect_vitals
@@ -277,8 +278,8 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// List sessions (for doctor queue)
-router.get('/', async (req, res) => {
+// List sessions (for doctor queue) — bulk PHI, clinical staff only.
+router.get('/', authMiddleware, requireRole('doctor', 'admin'), async (req, res) => {
   try {
     const { department, state } = req.query;
     let query = 'SELECT * FROM sessions WHERE 1=1';

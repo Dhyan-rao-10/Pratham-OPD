@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .routers import llm, triage, report, ocr, prescription, scribe, drugs, audio, transcribe, tts
 from .llm_client import LLMUnavailable
-from .auth import require_auth
+from .auth import require_auth, require_role
 from . import drug_repo
 
 logger = logging.getLogger(__name__)
@@ -48,14 +48,26 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 #   audio      → /clip/{id} (<audio src>) stays open
 #   ocr        → /documents/image/{id} (<img src>) stays open
 #   transcribe → /health stays open
+#
+# IMPORTANT: `require_auth` alone only proves the token is signed — and any caller
+# can mint a patient token via the public POST /api/session/scan. So a bare
+# `_auth` gate is equivalent to "public" for anything patient-specific. Routers
+# whose only legitimate callers are clinical staff are role-gated here; routers a
+# patient legitimately calls (llm, triage, report, ocr, audio, transcribe) gate
+# per-session inside the handler via `assert_session_access`.
 _auth = [Depends(require_auth)]
+_clinical = [Depends(require_role("doctor", "admin"))]
 app.include_router(llm.router, dependencies=_auth)
 app.include_router(triage.router, dependencies=_auth)
 app.include_router(report.router, dependencies=_auth)
 app.include_router(ocr.router)
-app.include_router(prescription.router, dependencies=_auth)
-app.include_router(scribe.router, dependencies=_auth)
-app.include_router(drugs.router, dependencies=_auth)
+# Drug-interaction checks are a prescribing-time action (doctor console only).
+app.include_router(prescription.router, dependencies=_clinical)
+# Consultation transcript + SOAP notes — doctor console only.
+app.include_router(scribe.router, dependencies=_clinical)
+# Formulary read (autocomplete) is doctor-facing; the /admin/* and /review-queue/*
+# writes are admin-only and gated per-route inside drugs.py.
+app.include_router(drugs.router, dependencies=_clinical)
 app.include_router(audio.router)
 app.include_router(transcribe.router)
 app.include_router(tts.router, dependencies=_auth)

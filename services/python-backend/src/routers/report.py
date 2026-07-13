@@ -11,10 +11,14 @@ from typing import Optional
 import anthropic
 
 from ..db import query, execute
-from ..auth import require_auth
+from ..auth import require_auth, require_role, assert_session_access
 from ..view_audit import record_view
 
 router = APIRouter(prefix="/api/report", tags=["report"])
+
+# Reading/editing a finished report is a clinician action (doctor console + HIS).
+# Patients never fetch a report — they only trigger /generate for their own session.
+clinical_only = [Depends(require_role("doctor", "admin"))]
 
 PROMPT_DIR = Path(__file__).parent.parent / "prompts"
 
@@ -22,7 +26,10 @@ class ReportRequest(BaseModel):
     session_id: str
 
 @router.post("/generate")
-async def generate_report(req: ReportRequest):
+async def generate_report(req: ReportRequest, claims: dict = Depends(require_auth)):
+    # Generating flips the session to COMPLETE (see _generate_report_impl), so an
+    # unscoped session_id let any caller force any patient's session into the queue.
+    assert_session_access(req.session_id, claims)
     try:
         return await _generate_report_impl(req)
     except HTTPException:
@@ -154,7 +161,7 @@ async def _generate_report_impl(req: ReportRequest):
     }
 
 
-@router.get("/{session_id}")
+@router.get("/{session_id}", dependencies=clinical_only)
 async def get_report(session_id: str, claims: dict = Depends(require_auth)):
     reports = query(
         "SELECT * FROM session_reports WHERE session_id = %s ORDER BY created_at DESC LIMIT 1",
@@ -177,7 +184,7 @@ async def get_report(session_id: str, claims: dict = Depends(require_auth)):
     }
 
 
-@router.post("/{session_id}/feedback")
+@router.post("/{session_id}/feedback", dependencies=clinical_only)
 async def submit_feedback(session_id: str, feedback: dict):
     val = feedback.get("feedback")
     if val not in ("accurate", "inaccurate"):
@@ -189,7 +196,7 @@ async def submit_feedback(session_id: str, feedback: dict):
     return {"stored": True}
 
 
-@router.post("/{session_id}/edit")
+@router.post("/{session_id}/edit", dependencies=clinical_only)
 async def edit_report(session_id: str, body: dict):
     """Store the doctor's full edited report markdown for the latest report. The AI
     original (report_md) is preserved untouched; the edited body lives in

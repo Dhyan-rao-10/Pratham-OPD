@@ -18,7 +18,7 @@ from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
 
 from ..db import execute
 from .. import storage
-from ..auth import require_auth
+from ..auth import require_auth, assert_session_access
 from ..bhashini import asr, medcorrect, _llm
 
 router = APIRouter(prefix="/api/transcribe", tags=["transcribe"])
@@ -47,7 +47,7 @@ async def translate(text: str = Form(...), source_lang: str = Form(...)):
         raise HTTPException(status_code=502, detail="Translation unavailable")
 
 
-@router.post("", dependencies=[Depends(require_auth)])
+@router.post("")
 async def transcribe(
     file: UploadFile = File(...),
     lang: str = Form(...),                 # REQUIRED — never default to a language
@@ -55,7 +55,11 @@ async def transcribe(
     session_id: Optional[str] = Form(default=None),
     question_id: Optional[str] = Form(default=None),
     duration_ms: Optional[int] = Form(default=None),
+    claims: dict = Depends(require_auth),
 ):
+    # The clip is persisted against session_id below — authorize that binding.
+    if session_id:
+        assert_session_access(session_id, claims)
     contents = await file.read()
     if not contents:
         raise HTTPException(status_code=400, detail="Empty audio")

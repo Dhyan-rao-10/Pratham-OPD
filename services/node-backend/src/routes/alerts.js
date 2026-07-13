@@ -1,12 +1,35 @@
 const { Router } = require('express');
+const { verifyToken } = require('../middleware/auth');
 
 const router = Router();
 
 // Connected SSE clients
 const clients = new Set();
 
-// SSE endpoint for nursing station alerts
-router.get('/stream', (req, res) => {
+// SSE endpoint for nursing station alerts.
+//
+// The broadcast payload carries patient_name + department (see python triage.py),
+// so this must not be open. EventSource cannot set an Authorization header, so the
+// token is accepted from ?token= as well — the standard workaround. Restricted to
+// clinical staff; a patient token (mintable by anyone via /api/session/scan) is
+// not enough.
+function requireClinicalSse(req, res, next) {
+  const header = req.headers.authorization || '';
+  const raw = header.startsWith('Bearer ') ? header.slice(7) : (req.query.token || header);
+  if (!raw) return res.status(401).json({ error: 'No token provided' });
+  try {
+    const claims = verifyToken(raw);
+    if (claims.role !== 'doctor' && claims.role !== 'admin') {
+      return res.status(403).json({ error: 'Forbidden: insufficient role' });
+    }
+    req.session_data = claims;
+    next();
+  } catch {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+}
+
+router.get('/stream', requireClinicalSse, (req, res) => {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',

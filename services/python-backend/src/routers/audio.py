@@ -19,7 +19,7 @@ from fastapi.responses import StreamingResponse
 
 from ..db import query, execute
 from .. import storage
-from ..auth import require_auth
+from ..auth import require_auth, assert_session_access
 
 router = APIRouter(prefix="/api/audio", tags=["audio"])
 
@@ -27,14 +27,16 @@ router = APIRouter(prefix="/api/audio", tags=["audio"])
 # NOTE on auth: /answer and /session/{id} require a valid JWT. /clip/{id} is left
 # open because it's consumed as an <audio src> (see api.answerAudioUrl), which
 # can't send an Authorization header; it only serves bytes for an opaque clip id.
-@router.post("/answer", dependencies=[Depends(require_auth)])
+@router.post("/answer")
 async def upload_answer_audio(
     file: UploadFile = File(...),
     session_id: str = Form(...),
     question_id: Optional[str] = Form(default=None),
     duration_ms: Optional[int] = Form(default=None),
     transcript: Optional[str] = Form(default=None),
+    claims: dict = Depends(require_auth),
 ):
+    assert_session_access(session_id, claims)
     contents = await file.read()
     if not contents:
         raise HTTPException(status_code=400, detail="Empty audio")
@@ -55,8 +57,9 @@ async def upload_answer_audio(
     return {"id": str(rows[0]["id"]) if rows else None}
 
 
-@router.get("/session/{session_id}", dependencies=[Depends(require_auth)])
-async def list_session_audio(session_id: str):
+@router.get("/session/{session_id}")
+async def list_session_audio(session_id: str, claims: dict = Depends(require_auth)):
+    assert_session_access(session_id, claims)
     rows = query(
         """SELECT id, question_id, mime, duration_ms, transcript, created_at
              FROM answer_audio

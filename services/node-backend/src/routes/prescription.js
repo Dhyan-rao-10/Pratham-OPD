@@ -2,10 +2,16 @@ const { Router } = require('express');
 const crypto = require('crypto');
 const pool = require('../models/db');
 const { authMiddleware, requireRole } = require('../middleware/auth');
+const { requireSessionAccess } = require('../middleware/ownership');
 const { sendServerError } = require('../utils/http');
 const { mergeRxTemplate } = require('../rxTemplate');
 
 const router = Router();
+
+// Allergy records drive `block`-severity interaction warnings at prescribing time,
+// so writing them is a clinical act — an unauthenticated write could deny care by
+// injecting a fabricated allergy against any phone number.
+const clinicalOnly = [authMiddleware, requireRole('doctor', 'admin')];
 
 // ── Hospital prescription template (branding/theme/toggles) ──
 // GET is public — the patient-facing digital prescription page renders with it.
@@ -144,7 +150,7 @@ router.post('/', authMiddleware, requireRole('doctor'), async (req, res) => {
 });
 
 // Get prescriptions for a session
-router.get('/session/:session_id', async (req, res) => {
+router.get('/session/:session_id', authMiddleware, requireSessionAccess(), async (req, res) => {
   try {
     const rxs = await pool.query(
       'SELECT p.*, d.name as doctor_name FROM prescriptions p LEFT JOIN doctors d ON p.doctor_id = d.id WHERE p.session_id = $1 ORDER BY p.created_at DESC',
@@ -186,7 +192,7 @@ router.post('/verify-qr', async (req, res) => {
 });
 
 // Patient allergies — list for a phone
-router.get('/allergies/:phone', async (req, res) => {
+router.get('/allergies/:phone', ...clinicalOnly, async (req, res) => {
   try {
     const result = await pool.query(
       'SELECT * FROM patient_allergies WHERE patient_phone = $1 ORDER BY created_at',
@@ -199,7 +205,7 @@ router.get('/allergies/:phone', async (req, res) => {
 });
 
 // Add allergy
-router.post('/allergies', async (req, res) => {
+router.post('/allergies', ...clinicalOnly, async (req, res) => {
   try {
     const { patient_phone, allergen, reaction_type, severity, source } = req.body;
     if (!patient_phone || !allergen) {

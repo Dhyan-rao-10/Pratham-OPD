@@ -1,11 +1,17 @@
 const { Router } = require('express');
 const pool = require('../models/db');
 const { sendServerError } = require('../utils/http');
+const { authMiddleware, requireRole } = require('../middleware/auth');
 
 const router = Router();
 
+// Clinical staff only. POST in particular accepts an arbitrary phone number and
+// message body which the follow-up worker then dispatches through Twilio — while
+// unauthenticated it was an open SMS/WhatsApp relay billed to this deployment.
+const clinicalOnly = [authMiddleware, requireRole('doctor', 'admin')];
+
 // List follow-ups (optionally filter by status)
-router.get('/', async (req, res) => {
+router.get('/', ...clinicalOnly, async (req, res) => {
   try {
     const { status, phone } = req.query;
     let sql = 'SELECT f.*, s.patient_name, s.department FROM scheduled_followups f JOIN sessions s ON f.session_id = s.id';
@@ -27,7 +33,7 @@ router.get('/', async (req, res) => {
 });
 
 // Schedule a follow-up manually
-router.post('/', async (req, res) => {
+router.post('/', ...clinicalOnly, async (req, res) => {
   try {
     const { session_id, protocol_id, patient_phone, message, send_at, channel } = req.body;
     if (!session_id || !patient_phone || !message || !send_at) {
@@ -45,7 +51,7 @@ router.post('/', async (req, res) => {
 });
 
 // Record patient response to a follow-up
-router.post('/:id/respond', async (req, res) => {
+router.post('/:id/respond', ...clinicalOnly, async (req, res) => {
   try {
     const { response } = req.body;
     const responseLower = (response || '').toLowerCase();

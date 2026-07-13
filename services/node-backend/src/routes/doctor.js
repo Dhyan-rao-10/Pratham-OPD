@@ -1,12 +1,19 @@
 const { Router } = require('express');
 const crypto = require('crypto');
 const pool = require('../models/db');
-const { signToken, verifyToken, authMiddleware, requireRole } = require('../middleware/auth');
+const { signToken, authMiddleware, requireRole } = require('../middleware/auth');
 
 const router = Router();
 
+// Every route below that acts as a doctor. Previously each handler re-implemented
+// this by hand (read the header, verifyToken, check role) — and three routes
+// forgot to, leaving them fully open. One shared gate, applied declaratively.
+const doctorOnly = [authMiddleware, requireRole('doctor')];
+// Clinical staff: the HIS admin dashboard and the doctor console both reach these.
+const clinicalOnly = [authMiddleware, requireRole('doctor', 'admin')];
+
 function hashPin(pin) {
-  return crypto.createHash('sha256').update(pin).digest('hex');
+  return crypto.createHash('sha256').update(String(pin)).digest('hex');
 }
 
 // Doctor PIN login
@@ -55,7 +62,7 @@ router.post('/', authMiddleware, requireRole('admin'), async (req, res) => {
     if (!name || !department || !phone || !pin) {
       return res.status(400).json({ error: 'name, department, phone, pin are required' });
     }
-    if (pin.length < 4 || pin.length > 6 || !/^\d+$/.test(pin)) {
+    if (!/^\d{4,6}$/.test(String(pin))) {
       return res.status(400).json({ error: 'PIN must be 4-6 digits' });
     }
 
@@ -101,7 +108,7 @@ router.patch('/:id', authMiddleware, requireRole('admin'), async (req, res) => {
       params.push(String(phone).trim()); sets.push(`phone = $${params.length}`);
     }
     if (pin !== undefined && pin !== '') {
-      if (pin.length < 4 || pin.length > 6 || !/^\d+$/.test(pin)) {
+      if (!/^\d{4,6}$/.test(String(pin))) {
         return res.status(400).json({ error: 'PIN must be 4-6 digits' });
       }
       params.push(hashPin(pin)); sets.push(`pin_hash = $${params.length}`);
@@ -154,11 +161,18 @@ router.post('/:id/reactivate', authMiddleware, requireRole('admin'), async (req,
   }
 });
 
-// List doctors (for admin)
-router.get('/', async (req, res) => {
+// List doctors. Any authenticated caller — the patient registration page offers a
+// "preferred doctor" chooser. A doctor's PHONE NUMBER is staff contact data, not
+// something a patient kiosk needs, so it is only returned to admins (the HIS
+// doctor-management screen is the only reader).
+router.get('/', authMiddleware, async (req, res) => {
   try {
     const { department } = req.query;
-    let q = 'SELECT id, name, department, phone, registration_no, is_active, created_at FROM doctors WHERE 1=1';
+    const isAdmin = req.session_data.role === 'admin';
+    const cols = isAdmin
+      ? 'id, name, department, phone, registration_no, is_active, created_at'
+      : 'id, name, department, registration_no, is_active, created_at';
+    let q = `SELECT ${cols} FROM doctors WHERE 1=1`;
     const params = [];
     if (department) { params.push(department); q += ` AND department = $${params.length}`; }
     q += ' ORDER BY name';
@@ -170,15 +184,9 @@ router.get('/', async (req, res) => {
 });
 
 // Get doctor's queue — assigned to them + unassigned in their department
-router.get('/queue', async (req, res) => {
+router.get('/queue', ...doctorOnly, async (req, res) => {
   try {
-    const auth = req.headers.authorization;
-    if (!auth) return res.status(401).json({ error: 'No token' });
-
-    const decoded = verifyToken(auth.replace('Bearer ', ''));
-    if (decoded.role !== 'doctor') return res.status(403).json({ error: 'Not a doctor token' });
-
-    const { doctor_id, department } = decoded;
+    const { doctor_id, department } = req.session_data;
 
     // Patient directory: ALL completed visits in this department (full history,
     // not just the last 24h), so each patient's previous visits can be grouped
@@ -229,24 +237,28 @@ router.get('/queue', async (req, res) => {
   }
 });
 
-// Assign session to doctor (self-assign or by admin)
-router.post('/assign/:session_id', async (req, res) => {
+// Assign session to doctor (self-assign)
+router.post('/assign/:session_id', ...doctorOnly, async (req, res) => {
   try {
-    const auth = req.headers.authorization;
-    if (!auth) return res.status(401).json({ error: 'No token' });
-
-    const decoded = verifyToken(auth.replace('Bearer ', ''));
-    if (decoded.role !== 'doctor') return res.status(403).json({ error: 'Not a doctor token' });
+    const decoded = req.session_data;
 
     // consulted_at is stamped ONCE (first open) and never overwritten, so the
     // Consulted list keeps a fixed order even when a patient is re-opened.
+    //
+    // The WHERE clause mirrors /open: acquire only if the visit is free or already
+    // mine, and not yet dispatched. Without it this route was an unconditional
+    // UPDATE — a second doctor could take a patient another doctor had locked,
+    // silently defeating the mutual exclusion /open implements.
     const result = await pool.query(
       `UPDATE sessions SET assigned_doctor_id = $1, updated_at = NOW(),
               consulted_at = COALESCE(consulted_at, NOW())
-       WHERE id = $2 RETURNING *`,
+       WHERE id = $2
+         AND dispatched_at IS NULL
+         AND (assigned_doctor_id IS NULL OR assigned_doctor_id = $1)
+       RETURNING *`,
       [decoded.doctor_id, req.params.session_id]
     );
-    if (!result.rows.length) return res.status(404).json({ error: 'Session not found' });
+    if (!result.rows.length) return await explainLockFailure(req, res);
 
     await pool.query(
       `INSERT INTO audit_log (session_id, event_type, actor, payload) VALUES ($1, 'doctor_assigned', $2, $3)`,
@@ -260,15 +272,30 @@ router.post('/assign/:session_id', async (req, res) => {
   }
 });
 
+// A guarded lock UPDATE matched no row. Distinguish "no such session" (404) from
+// "held by another doctor / already dispatched" (409) so the UI can say which.
+async function explainLockFailure(req, res) {
+  const cur = await pool.query(
+    `SELECT s.dispatched_at, d.name AS doctor_name
+       FROM sessions s LEFT JOIN doctors d ON s.assigned_doctor_id = d.id
+      WHERE s.id = $1`,
+    [req.params.session_id]
+  );
+  if (!cur.rows.length) return res.status(404).json({ error: 'Session not found' });
+  const row = cur.rows[0];
+  return res.status(409).json({
+    error: 'locked',
+    locked_by: row.doctor_name || 'another doctor',
+    dispatched: !!row.dispatched_at,
+  });
+}
+
 // OPEN (lock) a patient's visit for consultation. Atomic: succeeds only if the
 // visit is free or already mine and not yet dispatched. If another doctor holds
 // it, returns 409 with their name so the UI can say "being consulted already".
-router.post('/open/:session_id', async (req, res) => {
+router.post('/open/:session_id', ...doctorOnly, async (req, res) => {
   try {
-    const auth = req.headers.authorization;
-    if (!auth) return res.status(401).json({ error: 'No token' });
-    const decoded = verifyToken(auth.replace('Bearer ', ''));
-    if (decoded.role !== 'doctor') return res.status(403).json({ error: 'Not a doctor token' });
+    const decoded = req.session_data;
 
     // One active consultation per doctor: block opening a new patient while another
     // is still open (consulted, not yet dispatched). A patient merely reassigned to
@@ -330,23 +357,24 @@ router.post('/open/:session_id', async (req, res) => {
 // DISPATCH — the consultation is complete (Save & Generate QR clicked). Stamps
 // dispatched_at, which removes the visit from the active queue and moves it into
 // the doctor's Consulted list, releasing the lock.
-router.post('/dispatch/:session_id', async (req, res) => {
+router.post('/dispatch/:session_id', ...doctorOnly, async (req, res) => {
   try {
-    const auth = req.headers.authorization;
-    if (!auth) return res.status(401).json({ error: 'No token' });
-    const decoded = verifyToken(auth.replace('Bearer ', ''));
-    if (decoded.role !== 'doctor') return res.status(403).json({ error: 'Not a doctor token' });
+    const decoded = req.session_data;
 
+    // Only the doctor holding the visit (or nobody) may finish it — a doctor must
+    // not be able to close out a consultation another doctor is running.
     const result = await pool.query(
       `UPDATE sessions
           SET dispatched_at = NOW(),
               assigned_doctor_id = COALESCE(assigned_doctor_id, $1),
               consulted_at = COALESCE(consulted_at, NOW()),
               updated_at = NOW()
-        WHERE id = $2 RETURNING *`,
+        WHERE id = $2
+          AND (assigned_doctor_id IS NULL OR assigned_doctor_id = $1)
+        RETURNING *`,
       [decoded.doctor_id, req.params.session_id]
     );
-    if (!result.rows.length) return res.status(404).json({ error: 'Session not found' });
+    if (!result.rows.length) return await explainLockFailure(req, res);
 
     await pool.query(
       `INSERT INTO audit_log (session_id, event_type, actor, payload) VALUES ($1, 'doctor_dispatched', $2, $3)`,
@@ -360,21 +388,20 @@ router.post('/dispatch/:session_id', async (req, res) => {
 });
 
 // Unassign session — send back to pool
-router.post('/unassign/:session_id', async (req, res) => {
+router.post('/unassign/:session_id', ...doctorOnly, async (req, res) => {
   try {
-    const auth = req.headers.authorization;
-    if (!auth) return res.status(401).json({ error: 'No token' });
-
-    const decoded = verifyToken(auth.replace('Bearer ', ''));
-    if (decoded.role !== 'doctor') return res.status(403).json({ error: 'Not a doctor token' });
+    const decoded = req.session_data;
 
     // Abandon a lock — release the patient back to "waiting" (clear the doctor
-    // link AND the consulted stamp so it's open for anyone again).
+    // link AND the consulted stamp so it's open for anyone again). Only the
+    // holding doctor may abandon; you cannot drop someone else's lock.
     const result = await pool.query(
-      `UPDATE sessions SET assigned_doctor_id = NULL, consulted_at = NULL, updated_at = NOW() WHERE id = $1 RETURNING *`,
-      [req.params.session_id]
+      `UPDATE sessions SET assigned_doctor_id = NULL, consulted_at = NULL, updated_at = NOW()
+        WHERE id = $1 AND (assigned_doctor_id IS NULL OR assigned_doctor_id = $2)
+        RETURNING *`,
+      [req.params.session_id, decoded.doctor_id]
     );
-    if (!result.rows.length) return res.status(404).json({ error: 'Session not found' });
+    if (!result.rows.length) return await explainLockFailure(req, res);
 
     await pool.query(
       `INSERT INTO audit_log (session_id, event_type, actor, payload) VALUES ($1, 'doctor_unassigned', $2, $3)`,
@@ -393,22 +420,20 @@ router.post('/unassign/:session_id', async (req, res) => {
 // leaves the doctor's Consulted list entirely — and stamps released_at, which
 // makes the queue treat it as "filled now" again (re-surfaces at the top with a
 // NEW badge, like a fresh patient fill) and counts it as "waiting".
-router.post('/release/:session_id', async (req, res) => {
+router.post('/release/:session_id', ...doctorOnly, async (req, res) => {
   try {
-    const auth = req.headers.authorization;
-    if (!auth) return res.status(401).json({ error: 'No token' });
+    const decoded = req.session_data;
 
-    const decoded = verifyToken(auth.replace('Bearer ', ''));
-    if (decoded.role !== 'doctor') return res.status(403).json({ error: 'Not a doctor token' });
-
+    // Only the doctor who holds (or consulted) the visit may release it back.
     const result = await pool.query(
       `UPDATE sessions
           SET assigned_doctor_id = NULL, consulted_at = NULL, dispatched_at = NULL,
               released_at = NOW(), updated_at = NOW()
-        WHERE id = $1 RETURNING *`,
-      [req.params.session_id]
+        WHERE id = $1 AND (assigned_doctor_id IS NULL OR assigned_doctor_id = $2)
+        RETURNING *`,
+      [req.params.session_id, decoded.doctor_id]
     );
-    if (!result.rows.length) return res.status(404).json({ error: 'Session not found' });
+    if (!result.rows.length) return await explainLockFailure(req, res);
 
     await pool.query(
       `INSERT INTO audit_log (session_id, event_type, actor, payload) VALUES ($1, 'doctor_released', $2, $3)`,
@@ -430,7 +455,9 @@ router.post('/release/:session_id', async (req, res) => {
 //   {}  / null            → unassign (back to the current department's general pool).
 // In every assign/move case we clear the handoff stamps (consulted_at, dispatched_at)
 // so the receiving doctor sees a fresh entry. Triage is preserved.
-router.post('/reassign/:session_id', async (req, res) => {
+// Reached by BOTH the HIS admin dashboard and the doctor console (handoff), so
+// this is clinical-staff, not doctor-only. It previously had no auth check at all.
+router.post('/reassign/:session_id', ...clinicalOnly, async (req, res) => {
   try {
     const { target_doctor_id, department } = req.body;
 
@@ -508,13 +535,9 @@ router.post('/reassign/:session_id', async (req, res) => {
 });
 
 // Doctor's consulted patients — completed sessions assigned to them
-router.get('/consulted', async (req, res) => {
+router.get('/consulted', ...doctorOnly, async (req, res) => {
   try {
-    const auth = req.headers.authorization;
-    if (!auth) return res.status(401).json({ error: 'No token' });
-
-    const decoded = verifyToken(auth.replace('Bearer ', ''));
-    if (decoded.role !== 'doctor') return res.status(403).json({ error: 'Not a doctor token' });
+    const decoded = req.session_data;
 
     // Consulted = visits I finished (Save & Generate QR → dispatched_at set).
     // Merely opening/locking a patient does NOT put them here.
@@ -545,8 +568,8 @@ router.get('/consulted', async (req, res) => {
   }
 });
 
-// All sessions with doctor info — for HIS/admin dashboard
-router.get('/all-sessions', async (req, res) => {
+// All sessions with doctor info — for HIS/admin dashboard. Bulk PHI: staff only.
+router.get('/all-sessions', ...clinicalOnly, async (req, res) => {
   try {
     const { department, doctor_id, state, triage } = req.query;
     // display_state — the SINGLE source of truth for the HIS "State" column AND
@@ -587,18 +610,7 @@ router.get('/all-sessions', async (req, res) => {
 // (not erased), so it drops out of the active Queue and the patient's
 // previous-logins, but all its data is retained and it STAYS in the doctor's
 // Consulted history if it was consulted. Guarded behind doctor auth.
-router.delete('/session/:session_id', async (req, res) => {
-  const auth = req.headers.authorization;
-  if (!auth) return res.status(401).json({ error: 'No token' });
-
-  let decoded;
-  try {
-    decoded = verifyToken(auth.replace('Bearer ', ''));
-  } catch {
-    return res.status(401).json({ error: 'Invalid token' });
-  }
-  if (decoded.role !== 'doctor') return res.status(403).json({ error: 'Not a doctor token' });
-
+router.delete('/session/:session_id', ...doctorOnly, async (req, res) => {
   const { session_id } = req.params;
   try {
     const result = await pool.query(
@@ -614,17 +626,15 @@ router.delete('/session/:session_id', async (req, res) => {
 });
 
 // Change PIN
-router.post('/change-pin', async (req, res) => {
+router.post('/change-pin', ...doctorOnly, async (req, res) => {
   try {
-    const auth = req.headers.authorization;
-    if (!auth) return res.status(401).json({ error: 'No token' });
-
-    const decoded = verifyToken(auth.replace('Bearer ', ''));
-    if (decoded.role !== 'doctor') return res.status(403).json({ error: 'Not a doctor token' });
+    const decoded = req.session_data;
 
     const { old_pin, new_pin } = req.body;
     if (!old_pin || !new_pin) return res.status(400).json({ error: 'old_pin and new_pin required' });
-    if (new_pin.length < 4 || new_pin.length > 6) return res.status(400).json({ error: 'PIN must be 4-6 digits' });
+    // Coerce before measuring: a JSON number ({"new_pin": 1234}) has no .length,
+    // so the bounds check silently passed and hashPin() then threw a 500.
+    if (!/^\d{4,6}$/.test(String(new_pin))) return res.status(400).json({ error: 'PIN must be 4-6 digits' });
 
     const doc = await pool.query('SELECT pin_hash FROM doctors WHERE id = $1', [decoded.doctor_id]);
     if (!doc.rows.length || doc.rows[0].pin_hash !== hashPin(old_pin)) {

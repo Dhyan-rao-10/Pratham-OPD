@@ -1,8 +1,9 @@
 import os
 import json
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional
+from ..auth import require_auth, assert_session_access
 from ..db import query, execute
 
 router = APIRouter(prefix="/api/triage", tags=["triage"])
@@ -41,7 +42,11 @@ class TriageResponse(BaseModel):
     triggered_rules: list
 
 @router.post("/evaluate", response_model=TriageResponse)
-async def evaluate(req: TriageRequest):
+async def evaluate(req: TriageRequest, claims: dict = Depends(require_auth)):
+    # Writes triage_level onto the session and can fire a RED nursing alert —
+    # scope it to the caller's own session unless they are clinical staff.
+    assert_session_access(req.session_id, claims)
+
     # Load answers
     answers_rows = query(
         "SELECT question_id, answer_raw FROM session_answers WHERE session_id = %s",

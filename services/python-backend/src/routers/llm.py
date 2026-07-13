@@ -1,11 +1,12 @@
 import os
 import re
 from pathlib import Path
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 import anthropic
 
+from ..auth import require_auth, assert_session_access
 from ..db import query
 
 router = APIRouter(prefix="/api/llm", tags=["llm"])
@@ -23,7 +24,10 @@ class InterviewResponse(BaseModel):
     triage_flag: Optional[dict] = None
 
 @router.post("/interview", response_model=InterviewResponse)
-async def interview(req: InterviewRequest):
+async def interview(req: InterviewRequest, claims: dict = Depends(require_auth)):
+    # Reads the session's prior answers into the prompt context — scope it.
+    assert_session_access(req.session_id, claims)
+
     from ..llm_client import has_llm, complete as llm_complete
 
     if not has_llm():

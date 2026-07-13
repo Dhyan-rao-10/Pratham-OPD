@@ -2,6 +2,7 @@ const { Router } = require('express');
 const pool = require('../models/db');
 const { sendServerError } = require('../utils/http');
 const { authMiddleware, requireRole } = require('../middleware/auth');
+const { requireSessionAccess } = require('../middleware/ownership');
 
 const router = Router();
 
@@ -107,8 +108,8 @@ router.delete('/:id', ...adminOnly, async (req, res) => {
   }
 });
 
-// Evaluate which protocols apply to a session
-router.get('/evaluate/:session_id', async (req, res) => {
+// Evaluate which protocols apply to a session — reads the session's answers (PHI).
+router.get('/evaluate/:session_id', authMiddleware, requireSessionAccess(), async (req, res) => {
   try {
     const sessionId = req.params.session_id;
 
