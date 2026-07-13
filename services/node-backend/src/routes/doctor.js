@@ -1,20 +1,18 @@
 const { Router } = require('express');
-const crypto = require('crypto');
 const pool = require('../models/db');
 const { signToken, authMiddleware, requireRole } = require('../middleware/auth');
+const { isLocked, recordFailure, clearFailures } = require('../utils/loginLimiter');
+const { hashPin, verifyPin } = require('../utils/pinHash');
 
 const router = Router();
 
-// Every route below that acts as a doctor. Previously each handler re-implemented
+// Every route below that acts as a doctor.
+// (PIN hashing lives in utils/pinHash.js — bcrypt with legacy SHA-256 fallback.) Previously each handler re-implemented
 // this by hand (read the header, verifyToken, check role) — and three routes
 // forgot to, leaving them fully open. One shared gate, applied declaratively.
 const doctorOnly = [authMiddleware, requireRole('doctor')];
 // Clinical staff: the HIS admin dashboard and the doctor console both reach these.
 const clinicalOnly = [authMiddleware, requireRole('doctor', 'admin')];
-
-function hashPin(pin) {
-  return crypto.createHash('sha256').update(String(pin)).digest('hex');
-}
 
 // Doctor PIN login
 router.post('/login', async (req, res) => {
@@ -22,16 +20,44 @@ router.post('/login', async (req, res) => {
     const { phone, pin } = req.body;
     if (!phone || !pin) return res.status(400).json({ error: 'Phone and PIN required' });
 
+    // Brute-force lockout: reject early once this phone has failed too many times
+    // inside the window (a 4-digit PIN is otherwise trivially guessable).
+    const lock = await isLocked('doctor', String(phone));
+    if (lock.locked) {
+      return res.status(429).json({
+        error: `Too many failed attempts. Try again in ${Math.ceil(lock.retryAfter / 60)} min.`,
+        retry_after: lock.retryAfter,
+      });
+    }
+
     const result = await pool.query(
       'SELECT * FROM doctors WHERE phone = $1 AND is_active = true',
       [phone]
     );
-    if (!result.rows.length) return res.status(401).json({ error: 'Doctor not found' });
+    if (!result.rows.length) {
+      await recordFailure('doctor', String(phone));
+      return res.status(401).json({ error: 'Doctor not found' });
+    }
 
     const doctor = result.rows[0];
-    if (doctor.pin_hash !== hashPin(pin)) {
+    const { ok, needsRehash } = await verifyPin(pin, doctor.pin_hash);
+    if (!ok) {
+      await recordFailure('doctor', String(phone));
       return res.status(401).json({ error: 'Invalid PIN' });
     }
+
+    // Lazy migration: a legacy SHA-256 PIN just verified — upgrade it to bcrypt
+    // so the plaintext-recoverable hash is replaced. Best-effort; never blocks login.
+    if (needsRehash) {
+      try {
+        await pool.query('UPDATE doctors SET pin_hash = $1 WHERE id = $2', [await hashPin(pin), doctor.id]);
+      } catch (e) {
+        console.error('pin rehash failed (non-fatal):', e.message);
+      }
+    }
+
+    // Successful login — reset the failure counter for this phone.
+    await clearFailures('doctor', String(phone));
 
     const token = signToken({
       doctor_id: doctor.id,
@@ -70,7 +96,7 @@ router.post('/', authMiddleware, requireRole('admin'), async (req, res) => {
       `INSERT INTO doctors (name, department, phone, pin_hash, registration_no)
        VALUES ($1, $2, $3, $4, $5)
        RETURNING id, name, department, phone, registration_no, is_active, created_at`,
-      [name, department.toUpperCase(), phone, hashPin(pin), registration_no || null]
+      [name, department.toUpperCase(), phone, await hashPin(pin), registration_no || null]
     );
 
     res.json(result.rows[0]);
@@ -111,7 +137,7 @@ router.patch('/:id', authMiddleware, requireRole('admin'), async (req, res) => {
       if (!/^\d{4,6}$/.test(String(pin))) {
         return res.status(400).json({ error: 'PIN must be 4-6 digits' });
       }
-      params.push(hashPin(pin)); sets.push(`pin_hash = $${params.length}`);
+      params.push(await hashPin(pin)); sets.push(`pin_hash = $${params.length}`);
     }
 
     if (!sets.length) return res.status(400).json({ error: 'No fields to update' });
@@ -637,11 +663,12 @@ router.post('/change-pin', ...doctorOnly, async (req, res) => {
     if (!/^\d{4,6}$/.test(String(new_pin))) return res.status(400).json({ error: 'PIN must be 4-6 digits' });
 
     const doc = await pool.query('SELECT pin_hash FROM doctors WHERE id = $1', [decoded.doctor_id]);
-    if (!doc.rows.length || doc.rows[0].pin_hash !== hashPin(old_pin)) {
+    const okOld = doc.rows.length ? (await verifyPin(old_pin, doc.rows[0].pin_hash)).ok : false;
+    if (!okOld) {
       return res.status(401).json({ error: 'Invalid current PIN' });
     }
 
-    await pool.query('UPDATE doctors SET pin_hash = $1 WHERE id = $2', [hashPin(new_pin), decoded.doctor_id]);
+    await pool.query('UPDATE doctors SET pin_hash = $1 WHERE id = $2', [await hashPin(new_pin), decoded.doctor_id]);
     res.json({ updated: true });
   } catch (err) {
     res.status(500).json({ error: 'Internal server error' });

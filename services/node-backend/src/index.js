@@ -152,14 +152,18 @@ async function start() {
   // PIN (1234) in production. Reset via POST /api/doctor/change-pin or HIS doctor
   // management before going live. (Forcing a reset needs a schema flag — deferred.)
   try {
-    const DEFAULT_PIN_HASH = '03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4';
     const pool = require('./models/db');
-    const { rows } = await pool.query(
-      'SELECT COUNT(*)::int AS n FROM doctors WHERE is_active = true AND pin_hash = $1',
-      [DEFAULT_PIN_HASH]
-    );
-    if (rows[0].n > 0) {
-      const msg = `[security] ${rows[0].n} active doctor(s) still use the default demo PIN (1234). Reset before real use.`;
+    const { verifyPin } = require('./utils/pinHash');
+    // Check via verifyPin so this catches BOTH legacy SHA-256 hashes and the
+    // bcrypt hashes doctors migrate to on first login (a plain hash-equality
+    // check would silently miss every migrated doctor).
+    const { rows } = await pool.query('SELECT pin_hash FROM doctors WHERE is_active = true');
+    let n = 0;
+    for (const r of rows) {
+      if ((await verifyPin('1234', r.pin_hash)).ok) n++;
+    }
+    if (n > 0) {
+      const msg = `[security] ${n} active doctor(s) still use the default demo PIN (1234). Reset before real use.`;
       if (process.env.NODE_ENV === 'production') console.error('⚠️  ' + msg);
       else console.warn(msg);
     }

@@ -21,12 +21,13 @@ prioritisation, digital prescriptions with a tamper-proof QR, and an admin conso
 6. [First-time hospital setup](#first-time-hospital-setup)
 7. [The links (URLs)](#the-links-urls)
 8. [Production deployment](#production-deployment)
-9. [Optional integrations](#optional-integrations)
-10. [PWA (installable web app)](#pwa-installable-web-app)
-11. [Accessibility & design tokens](#accessibility--design-tokens)
-12. [Patient AI notice](#patient-ai-notice)
-13. [Project structure](#project-structure)
-14. [Operations & staff training](#operations--staff-training)
+9. [Monitoring & audit trail](#monitoring--audit-trail)
+10. [Optional integrations](#optional-integrations)
+11. [PWA (installable web app)](#pwa-installable-web-app)
+12. [Accessibility & design tokens](#accessibility--design-tokens)
+13. [Patient AI notice](#patient-ai-notice)
+14. [Project structure](#project-structure)
+15. [Operations & staff training](#operations--staff-training)
 
 ---
 
@@ -136,11 +137,16 @@ What each secret is, in plain terms:
 | `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | The **file-storage** username/password (uploaded documents & audio). |
 | `MINIO_KMS_SECRET_KEY` | The key that **encrypts uploaded files on disk** (in production). ⚠️ **Back this one up somewhere safe — if you lose it, encrypted files can't be opened, ever. Never change it after go-live.** |
 
-Two things the system does to keep you safe:
+Things the system does to keep you safe (nothing to configure — these are on by default):
 - **In production it refuses to start** with weak or default secrets (e.g. a leftover placeholder
   `JWT_SECRET` or `QR_SIGNING_SECRET`) — so you can't accidentally deploy insecurely.
+- **Doctor PINs are stored hashed with bcrypt** (salted + slow) — so even if the database were
+  copied, the PINs can't be read back out. Older installs upgrade automatically on next login.
+- **Login brute-force protection:** after a few wrong PINs a doctor's phone is locked out for a
+  while (tunable via `LOGIN_MAX_ATTEMPTS` / `LOGIN_LOCKOUT_SECONDS`), and the gateway also
+  rate-limits logins, OTP requests, and the expensive AI endpoints per client.
 - **Patient phone numbers are masked in logs**, and there's an **audit trail** of who viewed each
-  patient's record.
+  patient's record (see [Monitoring & audit trail](#monitoring--audit-trail)).
 
 The other keys in `.env.example` (`GEMINI_API_KEY`, `TWILIO_*`, `BHASHINI_*`, etc.) are **optional
 integrations** — the app runs without them (see [Optional integrations](#optional-integrations)).
@@ -195,6 +201,31 @@ DOMAIN=opd.yourhospital.in docker compose -f docker-compose.prod.yml up -d --bui
 This runs the app behind **Caddy**, which obtains and renews a free HTTPS certificate automatically.
 Only ports 80/443 are exposed; the database, file storage, and backends stay on the internal network.
 Full deploy / update / backup / restore / monitoring steps are in **[`deploy/OPERATIONS.md`](deploy/OPERATIONS.md)**.
+
+## Monitoring & audit trail
+What you can keep an eye on, split by who needs it. Full commands are in the
+[operations runbook](deploy/OPERATIONS.md#monitoring-a12).
+
+**For the admin / clinic lead (in the app):**
+- **Who viewed which patient** — every time a clinician opens a patient's summary it's recorded, along
+  with admin actions (who changed what, by name). This is the access **audit trail** (`audit_log`);
+  keep it for incident review.
+- **AI quality** — doctors rate each summary Accurate / Inaccurate; review the mix in **HIS → Analytics**.
+
+**For IT / whoever runs the server:**
+- **Is it up?** — point a free uptime monitor (UptimeRobot, healthchecks.io) at `https://<domain>/healthz`
+  (returns `200 ok`). For a deeper check, also hit `GET /api/queue/board?department=<CODE>` (exercises the
+  backend + database).
+- **Are the containers healthy?** — `docker compose -f docker-compose.prod.yml ps` (postgres/redis/minio/
+  node/python should all say healthy).
+- **After a deploy** — run `node scripts/smoke.js https://<domain>` (scan → OTP → register → triage).
+- **Login/abuse signals** — repeated `429` responses on `/api/doctor/login` mean the brute-force lockout is
+  firing; the startup log warns if any doctor still uses a default PIN.
+
+> **Note:** application-level error tracking (e.g. Sentry — catching backend exceptions centrally) is
+> **not wired yet**; it needs an account + DSN. Until then, use the container logs
+> (`docker compose logs -f node-backend python-backend`) and the checks above. See the runbook's
+> "Error tracking (TODO)".
 
 ## Optional integrations
 
