@@ -278,13 +278,16 @@ def _fallback_report(session_json):
                 if m.get('instructions'): line += f" ({m['instructions']})"
                 lines.append(line)
     # Include any patient-reported meds not already covered by the documents,
-    # listed plainly as bullets (no "patient also reported" prefix).
+    # labelled so the doctor can tell them from the OCR-extracted prescription
+    # meds above (these were typed by the patient at intake, not read off a doc).
     if patient_meds and patient_meds.lower() not in ('none', 'nil', 'no', ''):
         doc_names = " ".join(m.get('name', '').lower() for m in doc_meds)
         reported = [t.strip() for t in re.split(r'[,;\n]', patient_meds) if t.strip()]
         new_terms = [t for t in reported if t.lower() not in doc_names]
-        for term in new_terms:
-            lines.append(f"- {term}")
+        if new_terms:
+            lines.append("**Reported by patient (typed at intake):**")
+            for term in new_terms:
+                lines.append(f"- {term}")
     elif not doc_meds:
         lines.append("None")
 
