@@ -2,6 +2,7 @@ import os
 import re
 import json
 import uuid
+import logging
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +16,8 @@ from ..auth import require_auth, require_role, assert_session_access
 from ..view_audit import record_view
 
 router = APIRouter(prefix="/api/report", tags=["report"])
+
+logger = logging.getLogger(__name__)
 
 # Reading/editing a finished report is a clinician action (doctor console + HIS).
 # Patients never fetch a report — they only trigger /generate for their own session.
@@ -133,6 +136,30 @@ async def _generate_report_impl(req: ReportRequest):
                 l["source_date"] = str(doc.get("created_at", ""))[:10]
             all_doc_labs.extend(labs)
 
+        # High-value clinical context the OCR already extracts but that was being
+        # dropped before reaching the report LLM. These feed the interpretive
+        # sections directly — diagnosis/clinical_notes/investigations into Past
+        # Medical History (the prompt already asks for discharge-summary findings
+        # there), doctor_name for provenance of the prior encounter. Included only
+        # when present so absent fields don't clutter the prompt. (PHI note: this
+        # goes to the cloud LLM alongside the patient name already in the prompt;
+        # the §3 pseudonymisation concern is deferred to the Vertex migration.)
+        diagnosis = structured.get("diagnosis")
+        if diagnosis and str(diagnosis).strip():
+            doc_entry["diagnosis"] = str(diagnosis).strip()
+
+        clinical_notes = structured.get("clinical_notes")
+        if clinical_notes and str(clinical_notes).strip():
+            doc_entry["clinical_notes"] = str(clinical_notes).strip()
+
+        investigations = [str(i).strip() for i in (structured.get("investigations_ordered") or []) if str(i).strip()]
+        if investigations:
+            doc_entry["investigations_ordered"] = investigations
+
+        doctor_name = structured.get("doctor_name")
+        if doctor_name and str(doctor_name).strip():
+            doc_entry["doctor_name"] = str(doctor_name).strip()
+
         documents_data.append(doc_entry)
 
     # Build session JSON for the LLM
@@ -161,6 +188,21 @@ async def _generate_report_impl(req: ReportRequest):
     if has_llm():
         try:
             system_prompt = (PROMPT_DIR / "system_report.txt").read_text()
+            # Department-specific emphasis (admin-editable, migration 028). Appended
+            # to the base prompt so the SAME fixed section schema is reused for every
+            # department — this only reshapes prioritisation/wording, never the
+            # structure or the no-fabrication rule (spelled out in the wrapper below).
+            focus = _department_report_focus(session.get("department"))
+            if focus:
+                system_prompt += (
+                    f"\n\n## Department focus — {session.get('department')}\n"
+                    "The following is specialty-specific emphasis for this department. "
+                    "Apply it ONLY to what you prioritise and how you word the four "
+                    "sections above. It must NOT add, rename, drop, or reorder any "
+                    "section, and it can NEVER override the rule against inferring or "
+                    "fabricating clinical information.\n\n"
+                    f"{focus}"
+                )
             user_content = json.dumps(session_json, indent=2, default=str)
             report_md = llm_complete(system_prompt, user_content, max_tokens=2048)
         except Exception as e:
@@ -258,6 +300,25 @@ async def edit_report(session_id: str, body: dict):
         (edited or None, rows[0]["id"]),
     )
     return {"stored": True}
+
+
+def _department_report_focus(dept_code):
+    """Specialty-specific report emphasis for a department (migration 028),
+    admin-editable in HIS. Returns the trimmed focus text, or None when unset or
+    when the departments table isn't present (older deployments) — the caller then
+    uses the base prompt unchanged. Never raises: a lookup failure must not block
+    report generation."""
+    if not dept_code:
+        return None
+    try:
+        rows = query("SELECT report_focus FROM departments WHERE code = %s", (dept_code,))
+    except Exception:
+        logger.warning("department report_focus lookup failed; using base prompt", exc_info=True)
+        return None
+    if not rows:
+        return None
+    focus = (rows[0].get("report_focus") or "").strip()
+    return focus or None
 
 
 def _fallback_report(session_json):

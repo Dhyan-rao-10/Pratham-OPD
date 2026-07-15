@@ -455,14 +455,15 @@ function DoctorDashboard({ doctor }) {
     setTab('consulted');
   }
 
-  // Release a CONSULTED visit back to the active queue. Clears the doctor link +
-  // consulted stamp on the server and pops it to the top of the queue as a NEW
-  // entry. We also un-"see" the visit locally so its NEW badge shows again.
+  // Release the patient I've opened back to the active queue — for when a patient
+  // was opened by mistake. Clears the doctor link + consulted stamp on the server
+  // (which also frees my active lock) and pops the visit to the top of the queue as
+  // a NEW entry. We also un-"see" the visit locally so its NEW badge shows again.
   async function handleRelease() {
     if (!selected) return;
     if (!(await confirm({
       title: 'Release back to queue?',
-      message: 'This removes the visit from your Consulted list and sends it back to the top of the active queue as a new entry.',
+      message: 'This ends your consultation with this patient and sends them back to the top of the active queue as a new entry.',
       confirmLabel: 'Release',
     }))) return;
     try {
@@ -959,9 +960,9 @@ function DoctorDashboard({ doctor }) {
               <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 10 }}>
                 <TriageBadge level={selected.triage_level} />
                 <div style={{ display: 'flex', gap: 8, flexShrink: 0, alignItems: 'center', position: 'relative' }}>
-                {/* Queue: reassign — to another department's general queue, or to
-                    a specific doctor (searchable). Release lives on the Consulted
-                    side. */}
+                {/* Queue / Consulting: reassign — to another department's general
+                    queue, or to a specific doctor (searchable). Release (open by
+                    mistake) lives on the Consulting side. */}
                 {tab !== 'consulted' && selected.assigned_doctor_id && (
                   <div style={{ position: 'relative' }}>
                     <button onClick={() => setReassignOpen(o => !o)} title="Reassign this patient"
@@ -992,10 +993,11 @@ function DoctorDashboard({ doctor }) {
                   </div>
                 )}
 
-                {/* Consulted: release this visit back to the active queue. */}
-                {tab === 'consulted' && (
+                {/* Consulting: opened a patient by mistake? Release them back to the
+                    active queue (clears your lock so you can open the right one). */}
+                {tab === 'consulting' && (
                   <button onClick={handleRelease}
-                    title="Send this visit back to the active queue"
+                    title="Send this patient back to the active queue"
                     style={{ background: 'none', border: '1px solid var(--red)', color: 'var(--red)', borderRadius: 8, padding: '4px 12px', cursor: 'pointer', fontSize: 'calc(12px * var(--fs))' }}>
                     ↩ Release to queue
                   </button>
@@ -1951,10 +1953,18 @@ function PrescriptionPanel({ session, doctor, onDispatched }) {
           <p style={{ fontSize: 'calc(11px * var(--fs))', color: 'var(--text-light)', marginBottom: 8 }}>
             From patient intake (OCR and questionnaire). Edit, delete, or carry forward to prescription.
           </p>
+          {/* Column header (once) — keeps every data row uniform so Drug/Dose/Freq
+              line up; the per-row labels used to make only row 0 taller. */}
+          <div style={{ display: 'flex', gap: 6, marginBottom: 4, alignItems: 'flex-end' }}>
+            <div style={{ flex: 2, minWidth: 140 }}><label style={{ fontSize: 'calc(10px * var(--fs))', color: 'var(--text-light)' }}>Drug</label></div>
+            <div style={{ flex: 1, minWidth: 60 }}><label style={{ fontSize: 'calc(10px * var(--fs))', color: 'var(--text-light)' }}>Dose</label></div>
+            <div style={{ width: 70 }}><label style={{ fontSize: 'calc(10px * var(--fs))', color: 'var(--text-light)' }}>Freq</label></div>
+            <span style={{ width: 52 }} aria-hidden="true" />
+            <span style={{ width: 'calc(16px * var(--fs))' }} aria-hidden="true" />
+          </div>
           {currentMeds.map((med, idx) => (
-            <div key={med.id || idx} style={{ display: 'flex', gap: 6, marginBottom: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+            <div key={med.id || idx} style={{ display: 'flex', gap: 6, marginBottom: 6, alignItems: 'center' }}>
               <div style={{ flex: 2, minWidth: 140 }}>
-                {idx === 0 && <label style={{ fontSize: 'calc(10px * var(--fs))', color: 'var(--text-light)' }}>Drug</label>}
                 <input className="input" value={med.drug_name}
                   onChange={e => { const u = [...currentMeds]; u[idx] = { ...u[idx], drug_name: e.target.value }; setCurrentMeds(u); }}
                   style={{ minHeight: 32, fontSize: 'calc(13px * var(--fs))' }} />
@@ -1963,13 +1973,11 @@ function PrescriptionPanel({ session, doctor, onDispatched }) {
                 )}
               </div>
               <div style={{ flex: 1, minWidth: 60 }}>
-                {idx === 0 && <label style={{ fontSize: 'calc(10px * var(--fs))', color: 'var(--text-light)' }}>Dose</label>}
                 <input className="input" value={med.dose}
                   onChange={e => { const u = [...currentMeds]; u[idx] = { ...u[idx], dose: e.target.value }; setCurrentMeds(u); }}
                   style={{ minHeight: 32, fontSize: 'calc(13px * var(--fs))' }} placeholder="dose" />
               </div>
               <div style={{ width: 70 }}>
-                {idx === 0 && <label style={{ fontSize: 'calc(10px * var(--fs))', color: 'var(--text-light)' }}>Freq</label>}
                 <select className="input" value={med.frequency}
                   onChange={e => { const u = [...currentMeds]; u[idx] = { ...u[idx], frequency: e.target.value }; setCurrentMeds(u); }}
                   style={{ minHeight: 32, fontSize: 'calc(13px * var(--fs))' }}>
@@ -1977,11 +1985,11 @@ function PrescriptionPanel({ session, doctor, onDispatched }) {
                   {FREQ_OPTIONS.map(f => <option key={f} value={f}>{f}</option>)}
                 </select>
               </div>
-              <span style={{ fontSize: 'calc(9px * var(--fs))', padding: '2px 6px', borderRadius: 4, background: med.source === 'document' ? '#EBF5FB' : '#FEF9E7', color: 'var(--text-light)' }}>
+              <span style={{ width: 52, textAlign: 'center', flexShrink: 0, fontSize: 'calc(9px * var(--fs))', padding: '2px 4px', borderRadius: 4, background: med.source === 'document' ? '#EBF5FB' : '#FEF9E7', color: 'var(--text-light)' }}>
                 {med.source === 'document' ? 'OCR' : 'Patient'}
               </span>
               <button type="button" onClick={() => setCurrentMeds(currentMeds.filter((_, i) => i !== idx))}
-                style={{ background: 'none', border: 'none', color: 'var(--red)', cursor: 'pointer', fontSize: 'calc(16px * var(--fs))' }}>✕</button>
+                style={{ background: 'none', border: 'none', color: 'var(--red)', cursor: 'pointer', fontSize: 'calc(16px * var(--fs))', flexShrink: 0 }}>✕</button>
             </div>
           ))}
           <button type="button" disabled={allCurrentAdded} onClick={() => {

@@ -58,6 +58,11 @@ export default function Register() {
   const [resendIn, setResendIn] = useState(0);
   const timerRef = useRef(null);
 
+  // Gate progress-saving until AFTER the initial restore, so we never overwrite
+  // saved progress with the default (phone) state on mount. Using state (not a
+  // ref) so the save effect re-runs once restore has applied.
+  const [hydrated, setHydrated] = useState(false);
+
   useEffect(() => {
     const saved = sessionStorage.getItem('lang') || 'en';
     setLang(saved);
@@ -65,24 +70,70 @@ export default function Register() {
     if (token) setToken(token);
     if (!token) { router.push('/'); return; }
 
-    // Restore the identify step after a Go-Back from consent (within this same
-    // session) so the patient doesn't have to redo the OTP. Tied to session_id so
-    // a fresh QR scan never inherits a previous patient's verified state.
+    // Resume EXACTLY where the patient left off when they Go-Back into this page
+    // (from the documents page, or the browser back button) within the same
+    // session — SAME phase, SAME entered data, no skipped steps. Keyed by
+    // session_id so a fresh QR scan / new patient always starts clean.
     const sid = sessionStorage.getItem('session_id');
-    const savedV = sessionStorage.getItem('otp_verified');
-    if (savedV && sid) {
-      try {
-        const v = JSON.parse(savedV);
-        if (v.session_id === sid && v.phone) {
-          setPhone(v.phone);
-          setVerifiedPhone(v.phone);
-          setPeople(v.people || []);
-          setSelected((v.people && v.people.length) ? null : 'new');
-          setPhase('identify');
+    let restored = false;
+    try {
+      const p = JSON.parse(sessionStorage.getItem('register_progress') || 'null');
+      if (p && p.session_id === sid && p.phase) {
+        if (p.phone != null) setPhone(p.phone);
+        if (p.verifiedPhone != null) setVerifiedPhone(p.verifiedPhone);
+        if (p.people) setPeople(p.people);
+        if (p.selected !== undefined) setSelected(p.selected);
+        if (p.form) setForm(p.form);
+        if (p.identity) setIdentity(p.identity);
+        if (p.prefDoctorId) setPrefDoctorId(p.prefDoctorId);
+        setPhase(p.phase);
+        if (p.phase === 'department') {
+          loadDepartments();
+          // Reload the chosen department's doctors WITHOUT clearing the saved
+          // preference (selectDept would reset it).
+          if (p.chosenDept) {
+            setChosenDept(p.chosenDept);
+            api.listDoctors(p.chosenDept)
+              .then(list => setDoctors((list || []).filter(d => d && d.is_active !== false)))
+              .catch(() => setDoctors([]));
+          }
         }
-      } catch { /* ignore */ }
+        restored = true;
+      }
+    } catch { /* ignore */ }
+
+    // Legacy fallback: restore just the identify step from otp_verified.
+    if (!restored) {
+      const savedV = sessionStorage.getItem('otp_verified');
+      if (savedV && sid) {
+        try {
+          const v = JSON.parse(savedV);
+          if (v.session_id === sid && v.phone) {
+            setPhone(v.phone);
+            setVerifiedPhone(v.phone);
+            setPeople(v.people || []);
+            setSelected((v.people && v.people.length) ? null : 'new');
+            setPhase('identify');
+          }
+        } catch { /* ignore */ }
+      }
     }
+    setHydrated(true);
   }, []);
+
+  // Persist progress on every relevant change, so a Go-Back that UNMOUNTS this
+  // page (to documents / browser back) resumes at the same phase with the same
+  // data. Search-box text is intentionally excluded.
+  useEffect(() => {
+    if (!hydrated) return;
+    try {
+      const sid = sessionStorage.getItem('session_id') || '';
+      if (!sid) return;
+      sessionStorage.setItem('register_progress', JSON.stringify({
+        session_id: sid, phase, phone, verifiedPhone, people, selected, form, identity, chosenDept, prefDoctorId,
+      }));
+    } catch { /* ignore */ }
+  }, [hydrated, phase, phone, verifiedPhone, people, selected, form, identity, chosenDept, prefDoctorId]);
 
   // Resend cooldown countdown (matches the backend's 60s per-phone gate).
   useEffect(() => {
@@ -230,7 +281,7 @@ export default function Register() {
         preferred_doctor_id: prefDoctorId || null, preferred_doctor_name: prefName,
       });
       try { sessionStorage.setItem('department', chosenDept); } catch {}
-      router.push('/patient/consent');
+      router.push('/patient/documents');
     } catch (err) {
       if (/session not found|phone not verified|session_finished/i.test(err.message || '')) {
         setError(t('err_session_expired', lang));
@@ -276,7 +327,7 @@ export default function Register() {
           <button className="btn btn-primary" type="submit" disabled={loading}>
             {loading ? t('sending', lang) : t('send_code', lang)}
           </button>
-          <button type="button" className="btn btn-outline" onClick={() => router.push('/')}>
+          <button type="button" className="btn btn-outline" onClick={() => router.push('/patient/consent')}>
             ← {t('go_back', lang)}
           </button>
         </form>
@@ -466,7 +517,7 @@ export default function Register() {
           {error && <p style={{ color: 'var(--red)', fontSize: 13, textAlign: 'center', lineHeight: 1.4 }}>{error}</p>}
           <div style={{ flex: 1 }} />
           <button className="btn btn-primary" onClick={submitFinal} disabled={loading || !chosenDept}>
-            {loading ? '...' : t('submit', lang)}
+            {loading ? '...' : t('next', lang)}
           </button>
           {/* Back button at the BOTTOM */}
           <button type="button" className="btn btn-outline" onClick={() => { setPhase('identify'); setError(''); }}>

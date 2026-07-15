@@ -7,6 +7,21 @@ const { APP_TIMEZONE } = require('../utils/time');
 
 const router = Router();
 
+// How long an unfinished visit keeps blocking a re-entry for the same person.
+// A visit abandoned mid-flow (patient closes the tab at interview/vitals) is never
+// dispatched or removed, so without a cutoff it would block that name+phone from
+// EVER registering again. We only treat a prior open visit as "still in progress"
+// if it was touched within this window (default 12h — an OPD is same-day). Env-
+// tunable; 0 disables the window (old behaviour: any open visit blocks forever).
+const ACTIVE_VISIT_WINDOW_HOURS = (() => {
+  const n = parseInt(process.env.ACTIVE_VISIT_WINDOW_HOURS, 10);
+  return Number.isFinite(n) ? n : 12;
+})();
+// SQL fragment appended to the "already active" guards. Empty when disabled.
+const ACTIVE_WINDOW_SQL = ACTIVE_VISIT_WINDOW_HOURS > 0
+  ? `AND updated_at > NOW() - make_interval(hours => ${ACTIVE_VISIT_WINDOW_HOURS})`
+  : '';
+
 // Decode QR and create session
 router.post('/scan', async (req, res) => {
   try {
@@ -82,12 +97,26 @@ router.post('/register', authMiddleware, async (req, res) => {
     }
 
     // A patient is identified by phone + name (one number may serve a whole
-    // family). Block a SECOND concurrent entry for the same person while their
-    // previous visit is still open — i.e. an existing session for this phone+name
-    // that hasn't been removed and hasn't been finished by the doctor yet
-    // (dispatched_at still null). A DIFFERENT name on the same number is allowed
-    // through normally. The frontend turns 'already_active' into a wait message.
+    // family). Block a SECOND entry for the same person only while they have a
+    // COMPLETED visit still open — i.e. one that finished the pre-consult and is
+    // waiting in the doctor's queue or being consulted (not yet dispatched). A
+    // DIFFERENT name on the same number is allowed through normally. The frontend
+    // turns 'already_active' into a wait message.
     const nameKey = String(patient_name).trim().toLowerCase();
+    // An abandoned draft — the patient started a visit but never FINISHED the
+    // pre-consult, so it never reached the doctor's queue (state still INIT/
+    // REGISTERED/INTERVIEW/VITALS) — must NOT block this person from starting
+    // again, and the doctor can't see or clear it. Supersede any such prior
+    // INCOMPLETE session for this phone+name (soft-delete via removed_at). Only a
+    // COMPLETED visit — waiting in the queue or being consulted — counts as a real
+    // active duplicate worth blocking.
+    await pool.query(
+      `UPDATE sessions SET removed_at = NOW(), updated_at = NOW()
+        WHERE patient_phone = $1 AND lower(trim(patient_name)) = $2
+          AND id <> $3 AND removed_at IS NULL AND dispatched_at IS NULL
+          AND state <> 'COMPLETE'`,
+      [normalizedPhone, nameKey, session_id]
+    );
     const active = await pool.query(
       `SELECT 1 FROM sessions
         WHERE patient_phone = $1
@@ -95,6 +124,8 @@ router.post('/register', authMiddleware, async (req, res) => {
           AND id <> $3
           AND removed_at IS NULL
           AND dispatched_at IS NULL
+          AND state = 'COMPLETE'
+          ${ACTIVE_WINDOW_SQL}
         LIMIT 1`,
       [normalizedPhone, nameKey, session_id]
     );
@@ -199,6 +230,8 @@ router.post('/active-check', authMiddleware, async (req, res) => {
     const s = await pool.query('SELECT patient_phone FROM sessions WHERE id = $1', [session_id]);
     const phone = s.rows[0]?.patient_phone;
     if (!phone) return res.json({ active: false });
+    // Same rule as the /register guard: only a COMPLETED visit (in the queue or
+    // being consulted) counts as active — an unfinished draft never does.
     const r = await pool.query(
       `SELECT 1 FROM sessions
         WHERE patient_phone = $1
@@ -206,6 +239,8 @@ router.post('/active-check', authMiddleware, async (req, res) => {
           AND id <> $3
           AND removed_at IS NULL
           AND dispatched_at IS NULL
+          AND state = 'COMPLETE'
+          ${ACTIVE_WINDOW_SQL}
         LIMIT 1`,
       [phone, name, session_id]
     );
