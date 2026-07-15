@@ -487,6 +487,18 @@ router.post('/reassign/:session_id', ...clinicalOnly, async (req, res) => {
   try {
     const { target_doctor_id, department } = req.body;
 
+    // Once the consultation is finished (Save & Generate QR → dispatched_at set),
+    // the doctor assignment is LOCKED — reassigning would silently reopen a closed
+    // visit (it clears dispatched_at/consulted_at) and detach the completed record.
+    // Admins must not reassign a completed consultation (mentor rule, 2026-07-15).
+    // The deliberate way to send a FINISHED patient back to the queue is the
+    // assigned doctor's own POST /release, which is unaffected by this guard.
+    const cur = await pool.query('SELECT dispatched_at FROM sessions WHERE id = $1', [req.params.session_id]);
+    if (!cur.rows.length) return res.status(404).json({ error: 'Session not found' });
+    if (cur.rows[0].dispatched_at) {
+      return res.status(409).json({ error: 'Consultation already completed — reassignment is locked' });
+    }
+
     // ── Reassign to a specific doctor (+ follow their department) ──
     if (target_doctor_id) {
       const doc = await pool.query('SELECT id, name, department FROM doctors WHERE id = $1 AND is_active = true', [target_doctor_id]);

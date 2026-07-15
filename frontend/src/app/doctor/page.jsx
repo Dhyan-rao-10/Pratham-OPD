@@ -355,7 +355,7 @@ function DoctorDashboard({ doctor }) {
     try {
       await api.submitVitals(selected.id, { ...data, source: 'nurse' });
       const tri = await api.evaluate(selected.id);
-      await api.generateReport(selected.id);
+      await api.generateReport(selected.id, { force: true });   // vitals changed → refresh in place
       const [rep, v] = await Promise.all([api.getReport(selected.id), api.getVitals(selected.id)]);
       setReport(rep);
       setVitals(v);
@@ -425,7 +425,11 @@ function DoctorDashboard({ doctor }) {
       setActiveLock(p.key);
       setExpanded(e => ({ ...e, [p.key]: true }));
       markSeen(p.latest.id);
-      selectSession(p.latest);
+      // The server just assigned this visit to me (doctorOpen). Reflect that on the
+      // selected object right away — otherwise `selected.assigned_doctor_id` stays
+      // null (the pre-open cache) and the Reassign button stays hidden until a
+      // fresh reselect.
+      selectSession({ ...p.latest, assigned_doctor_id: doctor.id });
       setTab('consulting');   // patient is now in-progress → move to the Consulting tab
       loadQueue();
     } else if (res.locked) {

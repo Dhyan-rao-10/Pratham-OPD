@@ -61,6 +61,17 @@ function consultDuration(s) {
 // it calls) behind authentication.
 export default function HISPage() {
   const [authed, setAuthed] = useState(false);
+  const [ready, setReady] = useState(false);
+  // Restore a prior admin session on refresh. The token lives in sessionStorage
+  // (tab-scoped), mirroring the doctor page — without this, every reload dropped
+  // the in-memory token and forced a fresh passcode login. If the token is stale,
+  // the first API call 401s and drops back to the login screen (same as doctor).
+  useEffect(() => {
+    const saved = sessionStorage.getItem('admin_token');
+    if (saved) { setToken(saved); setAuthed(true); }
+    setReady(true);
+  }, []);
+  if (!ready) return null;   // avoid a flash of the login form before restore runs
   if (!authed) return <AdminLogin onSuccess={() => setAuthed(true)} />;
   return <HISDashboard />;
 }
@@ -78,6 +89,7 @@ function AdminLogin({ onSuccess }) {
     try {
       const { token } = await api.adminLogin(passcode, name.trim());
       setToken(token);
+      try { sessionStorage.setItem('admin_token', token); } catch {}
       onSuccess();
     } catch (err) {
       setError(err.message || 'Login failed');
@@ -138,6 +150,7 @@ function HISDashboard() {
   const [filters, setFilters] = useState({ department: '', doctor_id: '', triage: '', state: '' });
   const [showFilters, setShowFilters] = useState(false);   // filter popover open?
   const [search, setSearch] = useState('');                // name / phone search
+  const [exactMatch, setExactMatch] = useState(false);     // Enter commits an EXACT name/phone match (not substring)
   const [refreshing, setRefreshing] = useState(false);     // brief spin on the header refresh
   const [refreshKey, setRefreshKey] = useState(0);         // bumped to remount the active tab
   const { toast, toastView } = useToast();
@@ -230,29 +243,27 @@ function HISDashboard() {
   }
 
   async function handleUnassign(sessionId) {
-    // Use the reassign endpoint with null — but we need unassign via direct API
-    // Actually we have doctorUnassign but it needs a doctor token. For HIS, use reassign route workaround.
-    // Let's call the node backend directly for unassign
+    // Unassign = reassign with a null target (backend clears the doctor). Must go
+    // through the authed API client — the reassign route is clinician-only, so a
+    // bare fetch() without the admin token 401s.
     try {
-      const res = await fetch(`/api/doctor/reassign/${sessionId}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ target_doctor_id: null }),
-      });
-      if (!res.ok) throw new Error('Failed');
+      await api.doctorReassign(sessionId, null);
       loadData();
-    } catch {
-      // Fallback: set via session endpoint
-      toast('Unassign requires doctor login. Use reassign instead.', 'error');
+    } catch (err) {
+      toast('Unassign failed: ' + err.message, 'error');
     }
   }
 
-  // Client-side name/phone search over the (already filtered) sessions.
+  // Client-side name/phone search over the (already filtered) sessions. Substring
+  // by default; pressing Enter narrows to an EXACT name/phone match (so "d" shows
+  // only the patient literally named "d", not everyone whose name contains a d).
   const q = search.trim().toLowerCase();
   const visibleSessions = q
-    ? sessions.filter(s =>
-        (s.patient_name || '').toLowerCase().includes(q) ||
-        (s.patient_phone || '').toLowerCase().includes(q))
+    ? sessions.filter(s => {
+        const name = (s.patient_name || '').toLowerCase();
+        const phone = (s.patient_phone || '').toLowerCase();
+        return exactMatch ? (name === q || phone === q) : (name.includes(q) || phone.includes(q));
+      })
     : sessions;
 
   return (
@@ -366,28 +377,33 @@ function HISDashboard() {
                   <circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
                 </svg>
               </span>
-              {/* ghost overlay — mirrors typed text (transparent) then grey tail */}
+              {/* ghost overlay — mirrors typed text (transparent) then grey tail.
+                  It must share the input's box model exactly (border-box + a
+                  transparent 1px border + matching line-height) or the grey tail
+                  sits a pixel off the typed text. */}
               {ghostTail && (
-                <div aria-hidden style={{ position: 'absolute', inset: 0, paddingLeft: 36, paddingRight: 12,
-                  display: 'flex', alignItems: 'center', fontSize: 'calc(14px * var(--fs))', whiteSpace: 'pre', pointerEvents: 'none', overflow: 'hidden' }}>
+                <div aria-hidden style={{ position: 'absolute', inset: 0, boxSizing: 'border-box',
+                  border: '1px solid transparent', paddingLeft: 36, paddingRight: 12,
+                  fontSize: 'calc(14px * var(--fs))', lineHeight: '38px', whiteSpace: 'pre', pointerEvents: 'none', overflow: 'hidden' }}>
                   <span style={{ color: 'transparent' }}>{search}</span>
                   <span style={{ color: 'var(--text-light)' }}>{ghostTail}</span>
                 </div>
               )}
               <input
                 value={search}
-                onChange={e => setSearch(e.target.value)}
+                onChange={e => { setSearch(e.target.value); setExactMatch(false); }}
                 onKeyDown={e => {
                   if ((e.key === 'Tab' || e.key === 'ArrowRight') && ghostTail) { e.preventDefault(); acceptGhost(); }
-                  if (e.key === 'Escape') setSearch('');
+                  if (e.key === 'Enter') { e.preventDefault(); setExactMatch(true); }   // commit an exact match
+                  if (e.key === 'Escape') { setSearch(''); setExactMatch(false); }
                 }}
                 placeholder="Search patient name or phone…"
-                style={{ width: '100%', height: 40, paddingLeft: 36, paddingRight: search ? 32 : 12,
-                  border: '1px solid #CBD5E0', borderRadius: 10, fontSize: 'calc(14px * var(--fs))', background: 'transparent',
+                style={{ width: '100%', height: 40, boxSizing: 'border-box', paddingLeft: 36, paddingRight: search ? 32 : 12,
+                  border: '1px solid #CBD5E0', borderRadius: 10, fontSize: 'calc(14px * var(--fs))', lineHeight: '38px', background: 'transparent',
                   outline: 'none', position: 'relative' }}
               />
               {search && (
-                <button onClick={() => setSearch('')} title="Clear search"
+                <button onClick={() => { setSearch(''); setExactMatch(false); }} title="Clear search"
                   style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)',
                     background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-light)', display: 'flex', padding: 4 }}>
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
@@ -571,19 +587,40 @@ function HISDashboard() {
                   </td>
                   <td style={{ padding: '10px 12px', fontSize: 'calc(13px * var(--fs))' }}>
                     {s.doctor_name || <span style={{ color: 'var(--amber)', fontSize: 'calc(11px * var(--fs))' }}>Unassigned</span>}
+                    {/* Doctor the patient asked for at registration — a hint for the
+                        admin when balancing the queue, NOT an auto-assignment. */}
+                    {s.preferred_doctor_name && (
+                      <div title="Preferred doctor — chosen by the patient at registration"
+                        style={{ marginTop: 3, fontSize: 'calc(10.5px * var(--fs))', color: 'var(--text-light)', display: 'flex', alignItems: 'center', gap: 3 }}>
+                        <span style={{ color: 'var(--amber)' }} aria-hidden>★</span>
+                        Prefers {s.preferred_doctor_name}
+                      </div>
+                    )}
                   </td>
                   <td style={{ padding: '10px 12px' }} onClick={e => e.stopPropagation()}>
-                    <select
-                      value={s.assigned_doctor_id || ''}
-                      onChange={e => {
-                        const val = e.target.value;
-                        if (val) handleReassign(s.id, val);
-                        else handleUnassign(s.id);
-                      }}
-                      style={{ border: '1px solid #ccc', borderRadius: 6, padding: '4px 6px', fontSize: 'calc(12px * var(--fs))', cursor: 'pointer', maxWidth: 160 }}>
-                      <option value="">Unassigned</option>
-                      {doctors.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
-                    </select>
+                    {/* A finished consultation is locked — reassigning would reopen a
+                        closed visit. Backend enforces this too (409). */}
+                    {s.display_state === 'COMPLETED' ? (
+                      <span title="Consultation completed — assignment is locked"
+                        style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 'calc(11px * var(--fs))', color: 'var(--text-light)' }}>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                          <rect x="3" y="11" width="18" height="11" rx="2" ry="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                        </svg>
+                        Locked
+                      </span>
+                    ) : (
+                      <select
+                        value={s.assigned_doctor_id || ''}
+                        onChange={e => {
+                          const val = e.target.value;
+                          if (val) handleReassign(s.id, val);
+                          else handleUnassign(s.id);
+                        }}
+                        style={{ border: '1px solid #ccc', borderRadius: 6, padding: '4px 6px', fontSize: 'calc(12px * var(--fs))', cursor: 'pointer', maxWidth: 160 }}>
+                        <option value="">Unassigned</option>
+                        {doctors.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+                      </select>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -826,8 +863,9 @@ function DoctorInfo({ doctors = [], depts = [], onChange = () => {} }) {
             </svg>
           </span>
           {ghostTail && (
-            <div aria-hidden style={{ position: 'absolute', inset: 0, paddingLeft: 36, paddingRight: 12,
-              display: 'flex', alignItems: 'center', fontSize: 'calc(14px * var(--fs))', whiteSpace: 'pre', pointerEvents: 'none', overflow: 'hidden' }}>
+            <div aria-hidden style={{ position: 'absolute', inset: 0, boxSizing: 'border-box',
+              border: '1px solid transparent', paddingLeft: 36, paddingRight: 12,
+              fontSize: 'calc(14px * var(--fs))', lineHeight: '38px', whiteSpace: 'pre', pointerEvents: 'none', overflow: 'hidden' }}>
               <span style={{ color: 'transparent' }}>{search}</span>
               <span style={{ color: 'var(--text-light)' }}>{ghostTail}</span>
             </div>
@@ -840,8 +878,8 @@ function DoctorInfo({ doctors = [], depts = [], onChange = () => {} }) {
               if (e.key === 'Escape') setSearch('');
             }}
             placeholder="Search doctor name or department…"
-            style={{ width: '100%', height: 40, paddingLeft: 36, paddingRight: search ? 32 : 12,
-              border: '1px solid #CBD5E0', borderRadius: 10, fontSize: 'calc(14px * var(--fs))', background: 'transparent', outline: 'none' }}
+            style={{ width: '100%', height: 40, boxSizing: 'border-box', paddingLeft: 36, paddingRight: search ? 32 : 12,
+              border: '1px solid #CBD5E0', borderRadius: 10, fontSize: 'calc(14px * var(--fs))', lineHeight: '38px', background: 'transparent', outline: 'none' }}
           />
           {search && (
             <button onClick={() => setSearch('')} title="Clear search"
@@ -853,26 +891,17 @@ function DoctorInfo({ doctors = [], depts = [], onChange = () => {} }) {
             </button>
           )}
         </div>
+        {/* Count of registered doctors — mirrors the patient count on the Patients
+            tab. Replaces the old 4-card summary strip (per mentor feedback: the
+            aggregate cards weren't useful here). */}
+        <span style={{ fontSize: 'calc(14px * var(--fs))', fontWeight: 600, color: 'var(--text)' }}>
+          {doctors.length}
+          <span style={{ color: 'var(--text-light)', fontWeight: 400 }}> doctor{doctors.length !== 1 ? 's' : ''} registered</span>
+        </span>
         <button className="btn btn-primary" onClick={() => setShowAdd(true)}
           style={{ marginLeft: 'auto', height: 40, width: 'auto', padding: '0 18px', fontSize: 'calc(14px * var(--fs))', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
           + Add Doctor
         </button>
-      </div>
-
-      {/* Summary strip */}
-      <div style={{ display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
-        {[
-          ['Doctors', doctors.length, 'var(--primary)'],
-          ['Patients assigned', totals.total, 'var(--text)'],
-          ['Completed', totals.completed, 'var(--green)'],
-          ['Active', totals.active, 'var(--secondary)'],
-        ].map(([label, val, color]) => (
-          <div key={label} style={{ background: '#fff', borderRadius: 12, padding: '12px 18px',
-            boxShadow: '0 1px 4px rgba(0,0,0,0.06)', minWidth: 120 }}>
-            <div style={{ fontSize: 'calc(22px * var(--fs))', fontWeight: 700, color }}>{val}</div>
-            <div style={{ fontSize: 'calc(12px * var(--fs))', color: 'var(--text-light)', marginTop: 2 }}>{label}</div>
-          </div>
-        ))}
       </div>
 
       <div style={{ overflowX: 'auto' }}>
@@ -2308,8 +2337,10 @@ function AnalyticsDashboard() {
         <h3 style={{ fontSize: 'calc(15px * var(--fs))', color: 'var(--primary)', marginBottom: 12 }}>Intake stages · pre-consult funnel</h3>
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
           {(() => {
-            const RAW_STATE_LABEL = { INIT: 'Scanned', CONSENTED: 'Consented', REGISTERED: 'Registered', INTERVIEW: 'In Interview', VITALS: 'Vitals', COMPLETE: 'Ready' };
-            return (data.by_state || []).map(s => (
+            const RAW_STATE_LABEL = { CONSENTED: 'Consented', REGISTERED: 'Registered', INTERVIEW: 'In Interview', VITALS: 'Vitals', COMPLETE: 'Ready' };
+            // Hide INIT (scanned but abandoned before registering) — it's noise in
+            // the intake funnel, not a stage anyone acts on (mentor feedback).
+            return (data.by_state || []).filter(s => s.state !== 'INIT').map(s => (
               <div key={s.state} style={{ background: '#F8FAFC', borderRadius: 8, padding: '8px 16px', textAlign: 'center' }}>
                 <p style={{ fontSize: 'calc(11px * var(--fs))', color: 'var(--text-light)' }}>{RAW_STATE_LABEL[s.state] || s.state}</p>
                 <p style={{ fontSize: 'calc(20px * var(--fs))', fontWeight: 600 }}>{s.count}</p>
