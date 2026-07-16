@@ -5,8 +5,26 @@ const fs = require('fs');
 const path = require('path');
 
 const app = express();
-app.use(cors());
+// Trust the reverse proxy (Caddy/nginx) so req.protocol and forwarded headers
+// reflect the real client — needed for Twilio signature URL reconstruction (§8a).
+app.set('trust proxy', true);
+
+// §7a — CORS. The app is same-origin (browser → gateway → backend), so cross-
+// origin access is not needed in production. In prod we only allow the explicitly
+// configured origins (CORS_ALLOW_ORIGINS, comma-separated); with none set, no
+// permissive CORS header is emitted (same-origin only). Dev stays permissive.
+const _corsOrigins = (process.env.CORS_ALLOW_ORIGINS || '')
+  .split(',').map((s) => s.trim()).filter(Boolean);
+if (process.env.NODE_ENV === 'production') {
+  if (_corsOrigins.length) app.use(cors({ origin: _corsOrigins }));
+  // else: no CORS middleware — browser same-origin policy applies.
+} else {
+  app.use(cors());
+}
 app.use(express.json({ limit: '20mb' }));
+// Twilio posts webhooks as application/x-www-form-urlencoded — parse those too so
+// the WhatsApp webhook body (and its signature validation) work (§8a).
+app.use(express.urlencoded({ extended: false }));
 
 // Health check
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
@@ -31,6 +49,7 @@ app.use((req, res, next) => {
 // Routes
 app.use('/api/session', require('./routes/session'));
 app.use('/api/queue', require('./routes/queue'));
+app.use('/api/settings', require('./routes/settings'));
 app.use('/api/otp', require('./routes/otp'));
 app.use('/api/q', require('./routes/questionnaire'));
 app.use('/api/vitals', require('./routes/vitals'));
@@ -47,8 +66,8 @@ app.use('/his', require('./routes/mock-his'));
 // Seed questionnaire data on startup.
 //   - Every department gets the shared BASE intake questions (visit type,
 //     progress, chief complaint, current medicines, allergies) from one template.
-//   - A department with a matching seed file (the starter ships one for OPD)
-//     additionally gets its own department-specific DAG questions.
+//   - Departments with a seed file (CARD, GEN) additionally get their own
+//     department-specific DAG questions.
 async function seedQuestionnaires() {
   try {
     const total = parseInt((await pool.query('SELECT COUNT(*) FROM questionnaire_nodes')).rows[0].count);
@@ -100,19 +119,23 @@ async function seedQuestionnaires() {
     }
     console.log(`[seed] Base questions seeded for: ${deptCodes.join(', ')}`);
 
-    // 2) Department-specific DAG questions from seed files — ONLY for departments
-    //    that actually exist, so a blank install never resurrects demo content.
+    // 2) Department-specific DAG questions from seed files — DEMO CONTENT, off by
+    //    default. Opt in with SEED_DEMO_QUESTIONS=true (local/testing only).
     //
-    //    There are no starter seed files: a hospital adds its own departments in
-    //    HIS → Departments (which seeds that department's base questions via
-    //    baseNodesForDept) and then authors its DAG questions in the Questionnaires
-    //    tab. Drop a `<code>.json` in seed/ and add it here only if you want a
-    //    department pre-populated for a specific deployment.
-    const seedFiles = {};
+    //    Off by default because these are demo questionnaires, and a real hospital
+    //    would plausibly code its cardiology department `CARD` — which is all it
+    //    takes for demo questions to be injected into a live department's intake.
+    //    The `deptCodes` guard below is not enough on its own for that reason.
+    //    Gating on env rather than diverging the code keeps this file byte-identical
+    //    between here and the generated production repo: a difference that lives in
+    //    configuration cannot drift, one that lives in a diff eventually will.
+    //    Same intent as the demo doctors/departments split in migrations 005/006.
+    const seedFiles = process.env.SEED_DEMO_QUESTIONS === 'true'
+      ? { CARD: 'cardiology.json', GEN: 'general.json' }
+      : {};
     for (const [code, file] of Object.entries(seedFiles)) {
       if (!deptCodes.includes(code)) continue;
       const filePath = path.join(__dirname, 'seed', file);
-      if (!fs.existsSync(filePath)) continue;
       const nodes = JSON.parse(fs.readFileSync(filePath, 'utf8'));
       for (const node of nodes) await insertNode(node);
       console.log(`[seed] Loaded ${nodes.length} DAG nodes from ${file}`);
@@ -148,24 +171,30 @@ async function start() {
 
   await seedQuestionnaires();
 
-  // Pilot safety: warn loudly if any active doctor still uses the seeded demo
-  // PIN (1234) in production. Reset via POST /api/doctor/change-pin or HIS doctor
-  // management before going live. (Forcing a reset needs a schema flag — deferred.)
+  // §8b — Pilot safety: no active doctor may use the seeded demo PIN (1234) in
+  // production. Fail closed like JWT_SECRET: in production we FORCE-EXPIRE those
+  // accounts (set is_active = false) so the weak PIN can't be used, and an admin
+  // must re-activate them with a fresh PIN via HIS. In dev we only warn.
+  //
+  // Detection goes through verifyPin, one row at a time, because pin_hash holds
+  // bcrypt — salted, so there is no fixed digest to match with a set-based
+  // `WHERE pin_hash = $1`. A hash-equality check here would silently find nobody
+  // and this guard would fail open.
   try {
     const pool = require('./models/db');
     const { verifyPin } = require('./utils/pinHash');
-    // Check via verifyPin so this catches BOTH legacy SHA-256 hashes and the
-    // bcrypt hashes doctors migrate to on first login (a plain hash-equality
-    // check would silently miss every migrated doctor).
-    const { rows } = await pool.query('SELECT pin_hash FROM doctors WHERE is_active = true');
-    let n = 0;
+    const { rows } = await pool.query('SELECT id, pin_hash FROM doctors WHERE is_active = true');
+    const demoIds = [];
     for (const r of rows) {
-      if ((await verifyPin('1234', r.pin_hash)).ok) n++;
+      if ((await verifyPin('1234', r.pin_hash)).ok) demoIds.push(r.id);
     }
-    if (n > 0) {
-      const msg = `[security] ${n} active doctor(s) still use the default demo PIN (1234). Reset before real use.`;
-      if (process.env.NODE_ENV === 'production') console.error('⚠️  ' + msg);
-      else console.warn(msg);
+    if (demoIds.length) {
+      if (process.env.NODE_ENV === 'production') {
+        await pool.query('UPDATE doctors SET is_active = false WHERE id = ANY($1::uuid[])', [demoIds]);
+        console.error(`⚠️  [security] Force-expired ${demoIds.length} active doctor(s) still on the default demo PIN (1234). An admin must reset their PIN and re-activate them before they can log in.`);
+      } else {
+        console.warn(`[security] ${demoIds.length} active doctor(s) still use the default demo PIN (1234). Reset before real use.`);
+      }
     }
   } catch { /* non-fatal — doctors table may not exist yet on a brand-new DB */ }
 
@@ -176,6 +205,29 @@ async function start() {
   // Start follow-up worker
   const { startFollowupWorker } = require('./workers/followup-worker');
   startFollowupWorker();
+
+  // §6b — retention worker (hard-erases sessions older than RETENTION_DAYS).
+  // No-op unless RETENTION_DAYS > 0.
+  const { startRetentionWorker } = require('./workers/retention-worker');
+  startRetentionWorker();
 }
+
+// Last-resort safety nets. Every route and worker has its own try/catch, so these
+// only see what slips past — but since Node 15 an unhandled rejection terminates
+// the process, and losing the backend drops every in-flight request plus the SSE
+// alert stream for one stray promise. The two cases are NOT the same:
+//
+//  - unhandledRejection: a promise nobody awaited. The process is still sound, so
+//    log it loudly and keep serving rather than vanishing mid-consultation.
+//  - uncaughtException: the process may be in an undefined state. Serving on from
+//    corrupt state is worse than a restart for a clinical tool, so exit and let the
+//    supervisor bring us back clean (`restart: unless-stopped` in prod compose).
+process.on('unhandledRejection', (reason) => {
+  console.error('[node-backend] unhandled promise rejection (still serving):', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[node-backend] uncaught exception — exiting for a clean restart:', err);
+  process.exit(1);
+});
 
 start();

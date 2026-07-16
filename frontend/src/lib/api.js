@@ -12,7 +12,13 @@ async function apiFetch(path, opts = {}) {
   const res = await fetch(`${BASE}${path}`, { ...opts, headers });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(err.error || res.statusText);
+    // Carry the HTTP status on the Error so callers can tell a dead session
+    // (401/440 — only recoverable by starting a fresh entry) apart from a
+    // transient failure worth retrying. The message is unchanged, so existing
+    // `catch (err) { setError(err.message) }` callers keep working.
+    const e = new Error(err.error || res.statusText);
+    e.status = res.status;
+    throw e;
   }
   return res.json();
 }
@@ -26,6 +32,9 @@ export const api = {
   checkActive: (name) => apiFetch('/api/session/active-check', { method: 'POST', body: JSON.stringify({ name }) }),
   requestOtp: (phone) => apiFetch('/api/otp/request', { method: 'POST', body: JSON.stringify({ phone }) }),
   verifyOtp: (phone, code) => apiFetch('/api/otp/verify', { method: 'POST', body: JSON.stringify({ phone, code }) }),
+  // §8f — the OTP response only returns masked initials for prior people on this
+  // number; this reveals the FULL identity of the one the patient selects.
+  revealPerson: (index) => apiFetch('/api/otp/reveal', { method: 'POST', body: JSON.stringify({ index }) }),
   consent: () => apiFetch('/api/session/consent', { method: 'POST', body: '{}' }),
   getSession: (id) => apiFetch(`/api/session/${id}`),
   listSessions: (params) => apiFetch(`/api/session?${new URLSearchParams(params)}`),
@@ -49,6 +58,12 @@ export const api = {
   createDepartment: (data) => apiFetch('/api/admin/departments', { method: 'POST', body: JSON.stringify(data) }),
   updateDepartment: (code, data) => apiFetch(`/api/admin/departments/${code}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteDepartment: (code) => apiFetch(`/api/admin/departments/${code}`, { method: 'DELETE' }),
+  // What a delete would destroy — drives the confirmation copy.
+  departmentImpact: (code) => apiFetch(`/api/admin/departments/${code}/impact`),
+  // Permanent delete: also drops the department's questions and deactivates its
+  // doctors. `confirm` must equal the code; the server re-checks it.
+  forceDeleteDepartment: (code, confirm) =>
+    apiFetch(`/api/admin/departments/${code}?force=1`, { method: 'DELETE', body: JSON.stringify({ confirm }) }),
 
   // Admin — Questionnaire management
   getQuestions: (department) => apiFetch(`/api/admin/questions/${department}`),
@@ -74,6 +89,12 @@ export const api = {
   submitFeedback: (sessionId, feedback) => apiFetch(`/api/report/${sessionId}/feedback`, { method: 'POST', body: JSON.stringify({ feedback }) }),
   saveReportEdit: (sessionId, report_md) => apiFetch(`/api/report/${sessionId}/edit`, { method: 'POST', body: JSON.stringify({ report_md }) }),
 
+  // Global app settings (feature flags). Public read is used by the patient flow
+  // (e.g. whether to show the document/OCR step); the admin read/write is gated.
+  getPublicSettings: () => apiFetch('/api/settings/public'),
+  getAdminSettings: () => apiFetch('/api/settings'),
+  updateSettings: (data) => apiFetch('/api/settings', { method: 'PUT', body: JSON.stringify(data) }),
+
   // OCR
   uploadDocument: async (file, sessionId, docLabel) => {
     const formData = new FormData();
@@ -86,6 +107,8 @@ export const api = {
     return res.json();
   },
   confirmDocument: (docId, confirmed = true) => apiFetch(`/api/ocr/confirm/${docId}`, { method: 'POST', body: JSON.stringify({ confirmed }) }),
+  // Each document carries a short-lived signed `image_url` for the <img src>.
+  // Never build `/api/ocr/documents/image/<id>` by hand — it 403s without a sig.
   getDocuments: (sessionId) => apiFetch(`/api/ocr/documents/${sessionId}`),
 
   // Per-answer voice recordings (patient capture → doctor playback)
@@ -102,8 +125,10 @@ export const api = {
     if (!res.ok) throw new Error('audio upload failed');
     return res.json();
   },
+  // Each clip in the response carries a short-lived signed `url` for playback —
+  // an <audio src> can't send the Authorization header, so the authenticated
+  // list call is what mints the capability. Never build the clip URL by hand.
   getAnswerAudio: (sessionId) => apiFetch(`/api/audio/session/${sessionId}`),
-  answerAudioUrl: (clipId) => `${BASE}/api/audio/clip/${clipId}`,
 
   // Bhashini transcription — returns the transcript in the SPOKEN language
   // (no translation). Also stores the clip (WAV) for doctor playback.

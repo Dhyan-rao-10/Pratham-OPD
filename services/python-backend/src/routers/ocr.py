@@ -11,11 +11,19 @@ import pytesseract
 
 from ..db import execute, query
 from .. import storage
-from ..auth import require_auth, assert_session_access
+from ..auth import require_auth, enforce_ownership
+from ..ratelimit import rate_limit
+from ..view_audit import record_event
+from .. import media_urls
 from ..llm_client import complete_with_image, has_llm, has_vision
 from ..drug_data import normalize_drug_name, GENERIC_DRUGS, SORTED_GENERICS
 
 logger = logging.getLogger(__name__)
+
+# §8c — abuse/cost limiters. OCR can hit paid cloud vision; the image route is a
+# scrape target. Both fail open if Redis is down (see ratelimit.py).
+_rl_ocr = rate_limit("ocr_process", default_max=20, default_window=60)
+_rl_media = rate_limit("media", default_max=240, default_window=60)
 
 router = APIRouter(prefix="/api/ocr", tags=["ocr"])
 
@@ -37,6 +45,19 @@ OCR_MAX_DIM = int(os.getenv("OCR_MAX_DIM", "12000"))  # max px per side
 # How many PDF pages to read. Multi-page lab reports / discharge summaries were
 # previously truncated to page 1; we now stack up to this many pages into one image.
 OCR_PDF_MAX_PAGES = int(os.getenv("OCR_PDF_MAX_PAGES", "5"))
+
+
+def _ocr_enabled() -> bool:
+    """Read the hospital-wide OCR flag (app_settings.ocr_enabled, set from the HIS
+    admin dashboard). Fail OPEN — if the row/table can't be read we allow OCR, so a
+    transient DB issue never silently disables document scanning."""
+    try:
+        rows = query("SELECT value FROM app_settings WHERE key = 'ocr_enabled'")
+        if rows:
+            return str(rows[0]["value"]).strip().lower() == "true"
+    except Exception as e:
+        logger.warning(f"ocr_enabled read failed, defaulting to enabled: {e}")
+    return True
 
 
 def _apply_generic_names(meds: list) -> list:
@@ -120,6 +141,8 @@ For DISCHARGE_SUMMARY — extract:
 For DIAGNOSTIC_REPORT — extract:
   report type (ECG/Echo/X-Ray/MRI/etc.), key findings with measurements, overall impression or conclusion.
 
+DRUG ALLERGIES — capture only allergies the document EXPLICITLY documents (e.g. "Allergic to Penicillin", "K/C/O sulfa allergy", "H/O allergy to NSAIDs"), listed under "allergies" as a list of allergen names. NEVER infer an allergy from a drug merely being present or absent. Ignore "NKDA"/"no known drug allergies" (that is not an allergy). If none are explicitly stated, return an empty list.
+
 Handwriting rules:
 - Use medical context to resolve ambiguous characters: '1' vs 'l', '0' vs 'O', 'm' vs 'rn', 'cl' vs 'd'.
 - Do NOT skip partially legible entries — make your best medical interpretation and include them.
@@ -149,6 +172,7 @@ Return ONLY a valid JSON object. No markdown fences, no explanation, nothing out
     }
   ],
   "investigations_ordered": [],
+  "allergies": ["allergen name as documented"],
   "diagnosis": "diagnosis text or null",
   "doctor_name": "name or null",
   "lab_name": "lab or hospital name or null",
@@ -380,7 +404,7 @@ def extract_with_vision(image_bytes: bytes, mime_type: str, ocr_text: str, ocr_c
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
-@router.post("/process")
+@router.post("/process", dependencies=[Depends(_rl_ocr)])
 async def process_document(
     file: UploadFile = File(...),
     session_id: Optional[str] = Form(default=None),
@@ -389,9 +413,8 @@ async def process_document(
     claims: dict = Depends(require_auth),
 ):
     """Process an uploaded document image or PDF with AI vision + Tesseract fallback."""
-    # A document is attached to a session — only its owner (or clinical staff) may.
     if session_id:
-        assert_session_access(session_id, claims)
+        enforce_ownership(claims, session_id)  # §5c — upload only to own session
     contents = await file.read()
 
     # Guard: reject oversized uploads before loading them into memory.
@@ -444,6 +467,39 @@ async def process_document(
     if image.width > OCR_MAX_DIM or image.height > OCR_MAX_DIM:
         raise HTTPException(status_code=400, detail=f"Image dimensions too large (max {OCR_MAX_DIM}px per side)")
 
+    # ── OCR turned off hospital-wide (HIS admin → Settings) ──────────────────────
+    # Store the document as-is with NO extraction (no Tesseract, no vision LLM → no
+    # API cost). The image is saved so the doctor still sees the original in the
+    # Documents tab; the row stays patient_confirmed=false so the generated report
+    # excludes any document-derived content (report loads confirmed docs only).
+    if not _ocr_enabled():
+        image_key = None
+        if session_id:
+            try:
+                store_bytes = img_bytes if is_pdf else contents
+                store_mime = "image/png" if is_pdf else mime_type
+                ext = "png" if is_pdf else (mime_type.split("/")[-1] or "jpg").replace("jpeg", "jpg")
+                image_key = storage.upload_document(store_bytes, f"doc.{ext}", session_id, content_type=store_mime)
+            except Exception:
+                logger.warning("ocr document image store failed (non-fatal)", exc_info=True)
+        structured = {
+            "doc_type": doc_label or "document", "medications": [], "lab_values": [], "allergies": [],
+            "extraction_source": "ocr_disabled", "confidence_source": "none",
+        }
+        doc_id = None
+        if session_id:
+            rows = execute(
+                """INSERT INTO session_documents (session_id, doc_type, ocr_raw, ocr_structured, ocr_confidence, patient_confirmed, image_key)
+                   VALUES (%s, %s, %s, %s, %s, false, %s) RETURNING id""",
+                (session_id, doc_label or "document", "", json.dumps(structured), None, image_key),
+            )
+            if rows:
+                doc_id = str(rows[0]['id'])
+        return {
+            'doc_id': doc_id, 'raw_text': '', 'structured': structured,
+            'confidence': None, 'confidence_source': 'none', 'ocr_disabled': True,
+        }
+
     # Tesseract — for confidence score and printed-doc hint
     processed = preprocess_image(image)
     lang_map = {'en': 'eng', 'hi': 'eng+hin', 'te': 'eng+tel', 'eng': 'eng'}
@@ -486,6 +542,7 @@ async def process_document(
             "doc_type": doc_type,
             "medications":            _apply_generic_names(llm_result.get("medications") or []),
             "lab_values":             llm_result.get("lab_values") or [],
+            "allergies":              [str(a).strip() for a in (llm_result.get("allergies") or []) if str(a).strip()],
             "investigations_ordered": llm_result.get("investigations_ordered") or [],
             "diagnosis":              llm_result.get("diagnosis"),
             "doctor_name":            llm_result.get("doctor_name"),
@@ -505,6 +562,7 @@ async def process_document(
             "doc_type":          doc_type,
             "medications":       _apply_generic_names(extract_medications(raw_text)),
             "lab_values":        extract_lab_values(raw_text),
+            "allergies":         [],   # no reliable regex allergy extractor; vision LLM only
             "extraction_source": "regex_fallback",
             "confidence_source": confidence_source,
         }
@@ -521,8 +579,8 @@ async def process_document(
             store_mime = "image/png" if is_pdf else mime_type
             ext = "png" if is_pdf else (mime_type.split("/")[-1] or "jpg").replace("jpeg", "jpg")
             image_key = storage.upload_document(store_bytes, f"doc.{ext}", session_id, content_type=store_mime)
-        except Exception as e:
-            print(f"[ocr] document image store failed (non-fatal): {type(e).__name__}: {e}", flush=True)
+        except Exception:
+            logger.warning("ocr document image store failed (non-fatal)", exc_info=True)
 
     doc_id = None
     if session_id:
@@ -546,13 +604,12 @@ async def process_document(
 @router.post("/confirm/{doc_id}")
 async def confirm_document(doc_id: str, body: dict = {}, claims: dict = Depends(require_auth)):
     """Patient confirms or rejects OCR output."""
-    # Resolve the document's owning session before authorizing the write, so a
-    # patient can only confirm documents attached to their own session.
-    rows = query("SELECT session_id FROM session_documents WHERE id = %s", (doc_id,))
-    if not rows:
+    # §5c — resolve the doc's owning session and enforce ownership by it, so a
+    # patient token can't confirm/reject another session's document by its id.
+    owner = query("SELECT session_id FROM session_documents WHERE id = %s", (doc_id,))
+    if not owner:
         raise HTTPException(status_code=404, detail="Document not found")
-    assert_session_access(str(rows[0]["session_id"]), claims)
-
+    enforce_ownership(claims, str(owner[0]["session_id"]))
     confirmed = body.get('confirmed', True)
     execute("UPDATE session_documents SET patient_confirmed = %s WHERE id = %s", (confirmed, doc_id))
     return {'confirmed': confirmed}
@@ -560,18 +617,39 @@ async def confirm_document(doc_id: str, body: dict = {}, claims: dict = Depends(
 
 @router.get("/documents/{session_id}")
 async def get_documents(session_id: str, claims: dict = Depends(require_auth)):
-    """Get all documents for a session."""
-    assert_session_access(session_id, claims)
-    return query(
+    """Get all documents for a session.
+
+    Each document that has a stored image also carries `image_url` — a
+    short-lived signed URL for the (otherwise open) image route. The caller is
+    authenticated here, so this list is where the capability is minted.
+    """
+    enforce_ownership(claims, session_id)  # §5c — no cross-session doc enumeration
+    rows = query(
         "SELECT * FROM session_documents WHERE session_id = %s ORDER BY created_at",
         (session_id,),
     )
+    out = []
+    for r in rows:
+        doc = dict(r)
+        doc["image_url"] = media_urls.document_image_url(str(doc["id"])) if doc.get("image_key") else None
+        out.append(doc)
+    return out
 
 
-@router.get("/documents/image/{doc_id}")
-async def get_document_image(doc_id: str):
-    """Stream the stored image for an uploaded document (for the HIS viewer)."""
-    rows = query("SELECT image_key FROM session_documents WHERE id = %s", (doc_id,))
+@router.get("/documents/image/{doc_id}", dependencies=[Depends(_rl_media)])
+async def get_document_image(doc_id: str, exp: Optional[int] = None, sig: Optional[str] = None):
+    """Stream the stored image for an uploaded document.
+
+    No JWT — an `<img src>` cannot send one. Instead the URL must carry a live
+    HMAC signature minted by `GET /api/ocr/documents/{session_id}` (§5b).
+    """
+    media_urls.verify(media_urls.KIND_DOC, doc_id, exp, sig)
+    rows = query("SELECT image_key, session_id FROM session_documents WHERE id = %s", (doc_id,))
+    # §6a — audit the PHI image view (ids only; deduped per doc within the window).
+    if rows:
+        record_event("document_image_viewed", "signed-media",
+                     session_id=str(rows[0]["session_id"]),
+                     extra={"doc_id": doc_id}, dedup_key=doc_id)
     key = rows[0]["image_key"] if rows else None
     if not key:
         raise HTTPException(status_code=404, detail="No image for this document")

@@ -6,7 +6,7 @@ Two-step Bhashini flow (same as ASR):
 2. Pipeline INFERENCE (Dhruva) -> send text, get base64 WAV audio back.
 
 Reuses the keys, URLs and TLS context from asr.py so it doesn't duplicate config
-or touch the existing speech-to-text / translation code.
+or touch the existing speech-to-text / translation code (Samvith's area).
 """
 import base64
 

@@ -1,20 +1,14 @@
 /**
- * Brute-force protection for credential logins (doctor PIN).
+ * §8b — brute-force protection for credential logins (doctor PIN, admin passcode).
  *
- * A 4-digit PIN has only ~10k combinations, so an unthrottled POST /login is
- * trivially guessable. This is a Redis-backed sliding failure counter keyed per
- * identifier (the doctor's phone): after LOGIN_MAX_ATTEMPTS failures inside
- * LOGIN_LOCKOUT_SECONDS the identifier is locked out until the window expires; a
- * successful login clears the counter.
+ * Redis-backed sliding failure counter keyed per identifier. After
+ * LOGIN_MAX_ATTEMPTS failures inside LOGIN_LOCKOUT_SECONDS the identifier is
+ * locked out until the window expires; a successful login clears the counter.
  *
- * Keyed on the account identifier (not the client IP) on purpose — it survives
- * NAT (a whole hospital behind one IP) and any reverse-proxy topology, which
- * an nginx limit_req cannot. nginx IP limiting stays as a second layer.
- *
- * Redis is already in the stack (SSE alerts). If it is unavailable we fail OPEN
- * (no lockout) rather than deny all logins — losing brute-force protection is
- * preferable to an outage that locks every clinician out. The degraded state is
- * logged so it is visible.
+ * Redis is already in the stack (SSE alerts, triage). If it is unavailable we
+ * fail OPEN (no lockout) rather than deny all logins — losing brute-force
+ * protection is preferable to an outage that locks every clinician out. This is
+ * logged so the degraded state is visible.
  */
 const Redis = require('ioredis');
 
@@ -33,7 +27,7 @@ function getRedis() {
   }
   try {
     client = new Redis(url, { lazyConnect: false, maxRetriesPerRequest: 2 });
-    client.on('error', () => { /* handled per-call; avoid an unhandled-error crash */ });
+    client.on('error', () => { /* handled per-call; avoid unhandled error crash */ });
   } catch {
     client = false;
     console.warn('[login-limiter] Redis init failed — login rate limiting disabled (fail open).');
@@ -46,8 +40,8 @@ function keyFor(kind, identifier) {
   return `login:fail:${kind}:${identifier}`;
 }
 
-// Returns { locked, retryAfter } — locked when the identifier has already
-// exhausted its attempts inside the window.
+// Returns { locked: boolean, retryAfter: seconds } — locked when the identifier
+// has already exhausted its attempts inside the window.
 async function isLocked(kind, identifier) {
   const r = getRedis();
   if (!r) return { locked: false, retryAfter: 0 };

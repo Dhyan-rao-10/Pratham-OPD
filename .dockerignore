@@ -12,11 +12,21 @@ node_modules
 **/__pycache__
 **/.venv
 
-# Never ship secrets into a build context.
+# Never ship secrets or data into a build context.
 .env
 **/.env
 !**/.env.example
 
+# Large, irrelevant, or sensitive to the build. eval/ocr holds ground-truth
+# prescription images and transcripts — real patient documents. Keep them out of
+# any image layer.
+eval/
+backups/
+bhashini-lab/
+ocr-lab/
+stt-lab/
+Pratham-OPD/
 .git
 .gitignore
-docs/
+**/*.md
+!README.md

@@ -16,7 +16,7 @@ import json
 import os
 import time
 
-from fastapi import Depends, Header, HTTPException
+from fastapi import Header, HTTPException
 
 # Known placeholder / dev values are rejected so a misconfigured deploy can't run
 # on a guessable signing key (matches the node side's fail-closed posture).
@@ -72,50 +72,25 @@ def _verify(token: str) -> dict:
 
 async def require_auth(authorization: str = Header(default="")) -> dict:
     """FastAPI dependency: 401 unless a valid Bearer JWT is present. Returns the
-    decoded claims (role, session_id, doctor_id, ...).
-
-    NOTE: this proves only that the token is validly signed and unexpired. It says
-    NOTHING about role or which session the caller may touch — and a patient token
-    is obtainable by anyone (POST /api/session/scan is public by design). Any route
-    that reads or writes a specific patient's data must additionally use
-    `require_role(...)` or `assert_session_access(...)` below.
-    """
+    decoded claims (role, session_id, doctor_id, ...)."""
     if not authorization:
         raise HTTPException(status_code=401, detail="No token provided")
     token = authorization[7:] if authorization[:7].lower() == "bearer " else authorization
     return _verify(token)
 
 
-CLINICAL_ROLES = frozenset({"doctor", "admin"})
+def enforce_ownership(claims: dict, session_id: str) -> None:
+    """§5c horizontal-IDOR guard for python routes that take a session id.
 
-
-def require_role(*roles: str):
-    """FastAPI dependency factory: 403 unless the token's role is one of `roles`.
-
-    Mirrors node's `requireRole` in middleware/auth.js. Usable at the router level
-    (`include_router(..., dependencies=[Depends(require_role("doctor"))])`) or on a
-    single route.
-    """
-    allowed = frozenset(roles)
-
-    async def _dep(claims: dict = Depends(require_auth)) -> dict:
-        if (claims or {}).get("role") not in allowed:
-            raise HTTPException(status_code=403, detail="Forbidden: insufficient role")
-        return claims
-
-    return _dep
-
-
-def assert_session_access(session_id: str, claims: dict) -> None:
-    """Authorize `claims` against a specific `session_id`. Raises 403 otherwise.
-
-    Mirrors node's `requireSessionAccess` in middleware/ownership.js:
-      patient      -> only the session their own token was issued for
-      doctor/admin -> any session (clinical staff)
+    Clinicians (doctor/admin) may access any session in their remit. A patient
+    token is bound to exactly one session_id at issuance (node signs it into the
+    scan token) and may only touch that session's data. Anything else — a patient
+    reading another session, or a token with no session_id — is 403. Mirrors
+    node's requireSessionOwnership middleware.
     """
     role = (claims or {}).get("role")
-    if role in CLINICAL_ROLES:
+    if role in ("doctor", "admin"):
         return
-    if role == "patient" and session_id and claims.get("session_id") == session_id:
+    if role == "patient" and claims.get("session_id") and claims.get("session_id") == session_id:
         return
     raise HTTPException(status_code=403, detail="Forbidden: not your session")

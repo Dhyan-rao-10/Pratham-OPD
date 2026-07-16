@@ -13,6 +13,22 @@ import VitalsForm, { hasVitals } from '../../components/VitalsForm';
 const TRIAGE_COLORS = { RED: '#D9544D', AMBER: '#E0A82E', GREEN: '#3FA869' };
 const TRIAGE_SEVERITY = { RED: 0, AMBER: 1, GREEN: 2 };
 
+// True on phone-width viewports. The doctor dashboard is a desktop two-pane
+// layout (queue list + report side by side); on phones we can't fit both, so we
+// switch to a master-detail flow — the list OR the open patient's report, one at
+// a time — driven by this flag. SSR-safe (defaults to false until mounted).
+function useIsMobile(breakpoint = 768) {
+  const [isMobile, setIsMobile] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia(`(max-width: ${breakpoint}px)`);
+    const update = () => setIsMobile(mq.matches);
+    update();
+    mq.addEventListener('change', update);
+    return () => mq.removeEventListener('change', update);
+  }, [breakpoint]);
+  return isMobile;
+}
+
 function fmtVisitDate(ts) {
   try {
     return new Date(ts).toLocaleString(undefined, {
@@ -129,9 +145,9 @@ function PinLogin({ onLogin }) {
   }
 
   return (
-    <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg)' }}>
+    <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg)', padding: 16 }}>
       <form onSubmit={handleSubmit} style={{
-        background: '#fff', borderRadius: 16, padding: 32, width: 360,
+        background: '#fff', borderRadius: 16, padding: 32, width: '100%', maxWidth: 360,
         boxShadow: '0 4px 24px rgba(0,0,0,0.1)', display: 'flex', flexDirection: 'column', gap: 16
       }}>
         <div style={{ textAlign: 'center' }}>
@@ -141,7 +157,9 @@ function PinLogin({ onLogin }) {
         </div>
         <div>
           <label style={{ fontSize: 'calc(13px * var(--fs))', color: 'var(--text-light)' }}>Phone Number</label>
-          <input className="input" type="tel" value={phone} onChange={e => setPhone(e.target.value)} placeholder="9876500001" required autoFocus />
+          <input className="input" type="tel" inputMode="numeric" maxLength={10} value={phone}
+            onChange={e => setPhone(e.target.value.replace(/\D/g, '').slice(0, 10))}
+            placeholder="9876500001" required autoFocus />
         </div>
         <div>
           <label style={{ fontSize: 'calc(13px * var(--fs))', color: 'var(--text-light)' }}>PIN (4-6 digits)</label>
@@ -153,6 +171,7 @@ function PinLogin({ onLogin }) {
         <button className="btn btn-primary" type="submit" disabled={loading || pin.length < 4}>
           {loading ? 'Logging in...' : 'Login'}
         </button>
+        <p style={{ fontSize: 'calc(11px * var(--fs))', color: 'var(--text-light)', textAlign: 'center' }}>Demo: Phone 9876500001, PIN 1234</p>
       </form>
     </div>
   );
@@ -200,6 +219,7 @@ function DoctorDashboard({ doctor }) {
   const [switchBlocked, setSwitchBlocked] = useState(false);    // tried to open another patient before finishing → red flash + message
   const [departments, setDepartments] = useState([]);           // all departments (for cross-dept reassign)
   const [reassignOpen, setReassignOpen] = useState(false);      // reassign popover toggle
+  const isMobile = useIsMobile();                               // phone → master-detail (list OR report), not side-by-side
 
   useEffect(() => {
     loadQueue();
@@ -398,9 +418,22 @@ function DoctorDashboard({ doctor }) {
     const activelyMine = (p.lockedById === doctor.id && p.consultedAt) || activeLock === p.key;
     const lockedByOther = p.lockedById && p.lockedById !== doctor.id && activeLock !== p.key;
 
-    // Already my open consultation → just toggle the tree open/closed, no confirm.
+    // Already my open consultation → no confirm needed.
     if (activelyMine) {
-      setExpanded(e => ({ ...e, [p.key]: !e[p.key] }));
+      // Desktop: both panes are on screen, so this is a pure accordion — toggle the
+      // visit tree and leave the report pane alone.
+      //
+      // Phone: the report pane is display:none until something is selected, and the
+      // visit tree is the only thing that moves. Tapping your own open patient
+      // therefore looked like a dead tap — you had to know to tap the visit row
+      // underneath. Select the latest visit too, so one tap opens the report (the
+      // tree stays expanded, so "← Back to list" still shows the visit history).
+      if (isMobile) {
+        setExpanded(e => ({ ...e, [p.key]: true }));
+        if (p.latest) { markSeen(p.latest.id); selectSession({ ...p.latest, assigned_doctor_id: doctor.id }); }
+      } else {
+        setExpanded(e => ({ ...e, [p.key]: !e[p.key] }));
+      }
       return;
     }
     // I'm mid-consultation with someone else → block opening a second one.
@@ -673,12 +706,45 @@ function DoctorDashboard({ doctor }) {
   const timeStr = now.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', hour12: true });
 
   return (
-    <div className="doctor-layout" style={{ display: 'flex', gap: 16, height: '100vh', overflow: 'hidden', boxSizing: 'border-box' }}>
+    <div className="doctor-layout" style={{ display: 'flex', gap: 16, boxSizing: 'border-box',
+      // Desktop: two fixed-height panes side by side. Phone: stack, let the page
+      // scroll normally so nothing is clipped off the right edge.
+      flexDirection: isMobile ? 'column' : 'row',
+      height: isMobile ? 'auto' : '100vh',
+      minHeight: isMobile ? '100dvh' : undefined,
+      overflow: isMobile ? 'visible' : 'hidden' }}>
       {dialog}
       {toastView}
+      {/* Blocked-switch notice — you must finish the current patient first.
+          Rendered at the top level (not inside the report pane) so it also shows
+          on phones, where the report pane is display:none while the list is up.
+          Uses ConfirmDialog (hideCancel ⇒ role="alertdialog") for the focus trap
+          and Escape handling. Not routed through useConfirm: the same
+          `switchBlocked` flag also tints the report pane red, so it has to stay a
+          plain boolean rather than a promise. */}
+      {switchBlocked && (
+        <ConfirmDialog
+          hideCancel
+          danger
+          icon="✋"
+          title="Finish current patient first"
+          message={<>You're currently consulting a patient. Complete their prescription and click <strong>Save &amp; Generate QR</strong> before opening another patient.</>}
+          confirmLabel="OK"
+          onConfirm={() => setSwitchBlocked(false)}
+          onCancel={() => setSwitchBlocked(false)}
+        />
+      )}
       {/* Left Panel — fixed-height column: the header/tabs/search stay put while
-          only the patient list below scrolls in its own scrollbar. */}
-      <div style={{ width: 340, flexShrink: 0, position: 'sticky', top: 16, height: 'calc(100vh - 32px)', display: 'flex', flexDirection: 'column' }}>
+          only the patient list below scrolls in its own scrollbar. On phone it
+          becomes full-width and is hidden once a patient is opened (detail view). */}
+      <div style={{
+        width: isMobile ? '100%' : 340,
+        flexShrink: 0,
+        position: isMobile ? 'static' : 'sticky',
+        top: isMobile ? undefined : 16,
+        height: isMobile ? 'auto' : 'calc(100vh - 32px)',
+        display: (isMobile && selected) ? 'none' : 'flex',
+        flexDirection: 'column' }}>
         <style>{`@keyframes skpulse { 0%,100% { opacity:1 } 50% { opacity:.45 } } @keyframes spin { from { transform: rotate(0) } to { transform: rotate(360deg) } }`}</style>
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 12 }}>
           <div style={{ flex: 1 }}>
@@ -917,24 +983,22 @@ function DoctorDashboard({ doctor }) {
 
       {/* Right Panel — own height + internal scroll so the report scrolls
           inside the card and never nudges the whole page at the edges. */}
-      <div className="scrolly" style={{ flex: 1, minWidth: 0, height: '100%', background: switchBlocked ? '#FDF1EF' : 'var(--card-bg)', borderRadius: 16, padding: 24, border: switchBlocked ? '1.5px solid #E6A79F' : '1.5px solid transparent', boxShadow: '0 2px 8px rgba(0,0,0,0.08)', transition: 'background 0.15s, border-color 0.15s' }}>
-        {/* Blocked-switch notice — you must finish the current patient first.
-            Rendered via ConfirmDialog (hideCancel ⇒ role="alertdialog") so it gets
-            the focus trap and Escape handling. Not routed through useConfirm: the
-            same `switchBlocked` flag also tints this pane red, so it has to stay a
-            plain boolean rather than a promise. `danger` colours the heading only —
-            the lone button dismisses and destroys nothing. */}
-        {switchBlocked && (
-          <ConfirmDialog
-            hideCancel
-            danger
-            icon="✋"
-            title="Finish current patient first"
-            message={<>You're currently consulting a patient. Complete their prescription and click <strong>Save &amp; Generate QR</strong> before opening another patient.</>}
-            confirmLabel="OK"
-            onConfirm={() => setSwitchBlocked(false)}
-            onCancel={() => setSwitchBlocked(false)}
-          />
+      <div className="scrolly" style={{ flex: 1, minWidth: 0,
+        // Desktop: fixed full-height pane that scrolls internally. Phone: hidden
+        // until a patient is picked, then full-width with natural page scroll.
+        display: (isMobile && !selected) ? 'none' : 'block',
+        height: isMobile ? 'auto' : '100%',
+        overflowY: isMobile ? 'visible' : undefined,
+        padding: isMobile ? 16 : 24,
+        background: switchBlocked ? '#FDF1EF' : 'var(--card-bg)', borderRadius: 16, border: switchBlocked ? '1.5px solid #E6A79F' : '1.5px solid transparent', boxShadow: '0 2px 8px rgba(0,0,0,0.08)', transition: 'background 0.15s, border-color 0.15s' }}>
+        {/* Phone-only: return to the queue list (the list is hidden while a
+            patient is open). Deselecting only changes the view — any active
+            consultation lock is kept, so the patient can be reopened. */}
+        {isMobile && selected && (
+          <button onClick={() => { setSelected(null); setReport(null); }}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginBottom: 14, background: 'none', border: '1px solid #d5dce4', borderRadius: 8, padding: '7px 12px', fontSize: 'calc(13px * var(--fs))', fontWeight: 600, color: 'var(--secondary)', cursor: 'pointer' }}>
+            ← Back to list
+          </button>
         )}
         {!selected && (
           <div style={{ textAlign: 'center', marginTop: 90, color: 'var(--text-light)' }}>
@@ -957,7 +1021,7 @@ function DoctorDashboard({ doctor }) {
                   patient name always sits on its OWN line below the triage (kept
                   consistent for every entry), prefixed with a small "PATIENT"
                   label so it can't be mistaken for the triage or the meta line. */}
-              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 10 }}>
+              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 10, flexWrap: 'wrap' }}>
                 <TriageBadge level={selected.triage_level} />
                 <div style={{ display: 'flex', gap: 8, flexShrink: 0, alignItems: 'center', position: 'relative' }}>
                 {/* Queue / Consulting: reassign — to another department's general
@@ -1063,7 +1127,7 @@ function DoctorDashboard({ doctor }) {
                               {label}
                               {clip.duration_ms ? <span style={{ fontWeight: 400, color: 'var(--text-light)' }}> · {(clip.duration_ms / 1000).toFixed(1)}s</span> : null}
                             </p>
-                            <audio controls preload="none" src={api.answerAudioUrl(clip.id)} style={{ width: '100%', height: 36 }} />
+                            <audio controls preload="metadata" src={clip.url} style={{ width: '100%', height: 36 }} />
                           </div>
                         );
                       })}
@@ -1217,9 +1281,9 @@ function DoctorDashboard({ doctor }) {
                       <span style={{ marginLeft: 'auto', fontSize: 'calc(11px * var(--fs))', color: 'var(--text-light)' }}>{d.created_at ? fmtVisitDate(d.created_at) : ''}</span>
                     </div>
                     <div style={{ padding: 12 }}>
-                      {d.image_key ? (
-                        <a href={`/api/ocr/documents/image/${d.id}`} target="_blank" rel="noreferrer">
-                          <img src={`/api/ocr/documents/image/${d.id}`} alt="uploaded document"
+                      {d.image_url ? (
+                        <a href={d.image_url} target="_blank" rel="noreferrer">
+                          <img src={d.image_url} alt="uploaded document"
                             style={{ width: '100%', objectFit: 'contain', borderRadius: 6, border: '1px solid #EEF2F6', background: '#fff', cursor: 'zoom-in' }} />
                         </a>
                       ) : (
@@ -1706,8 +1770,12 @@ function PrescriptionPanel({ session, doctor, onDispatched }) {
             meds.push({ id: rxUid(), drug_name: formal, brand, dose: primaryDose(m.dose), frequency: m.frequency || '', source: 'document', duration: '', instructions: '' });
           });
         }
-        // Patient-reported from questionnaire answer
-        const patientMeds = reportJson?.answers?.q_medications;
+        // Patient-reported from questionnaire answer. Base questions are namespaced
+        // per department (q_<dept>_base_medications), so match the id suffix rather
+        // than a fixed 'q_medications' (which never matches → empty pre-fill).
+        const _ans = reportJson?.answers || {};
+        const _medKey = Object.keys(_ans).find(k => k.endsWith('_base_medications'));
+        const patientMeds = _medKey ? _ans[_medKey] : _ans.q_medications;
         if (patientMeds && patientMeds.toLowerCase() !== 'none' && patientMeds.toLowerCase() !== 'nil') {
           // Comma-separated; split each entry into name + strength so the dose
           // column is populated (e.g. "Dolo 650" -> Dolo / 650).
@@ -1963,13 +2031,16 @@ function PrescriptionPanel({ session, doctor, onDispatched }) {
             <span style={{ width: 'calc(16px * var(--fs))' }} aria-hidden="true" />
           </div>
           {currentMeds.map((med, idx) => (
-            <div key={med.id || idx} style={{ display: 'flex', gap: 6, marginBottom: 6, alignItems: 'center' }}>
-              <div style={{ flex: 2, minWidth: 140 }}>
+            <div key={med.id || idx} style={{ display: 'flex', gap: 6, marginBottom: med.brand ? 20 : 6, alignItems: 'center' }}>
+              {/* position: relative so the "written as" caption can hang BELOW the
+                  input without adding height to this column — otherwise the taller
+                  Drug column pushed the centered Dose/Freq boxes down out of line. */}
+              <div style={{ flex: 2, minWidth: 140, position: 'relative' }}>
                 <input className="input" value={med.drug_name}
                   onChange={e => { const u = [...currentMeds]; u[idx] = { ...u[idx], drug_name: e.target.value }; setCurrentMeds(u); }}
                   style={{ minHeight: 32, fontSize: 'calc(13px * var(--fs))' }} />
                 {med.brand && (
-                  <div style={{ fontSize: 'calc(9px * var(--fs))', color: 'var(--text-light)', marginTop: 2 }}>written as: {med.brand}</div>
+                  <div style={{ position: 'absolute', top: '100%', left: 2, marginTop: 2, whiteSpace: 'nowrap', fontSize: 'calc(9px * var(--fs))', color: 'var(--text-light)' }}>written as: {med.brand}</div>
                 )}
               </div>
               <div style={{ flex: 1, minWidth: 60 }}>

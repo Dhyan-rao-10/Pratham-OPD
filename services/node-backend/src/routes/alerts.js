@@ -7,29 +7,22 @@ const router = Router();
 const clients = new Set();
 
 // SSE endpoint for nursing station alerts.
-//
-// The broadcast payload carries patient_name + department (see python triage.py),
-// so this must not be open. EventSource cannot set an Authorization header, so the
-// token is accepted from ?token= as well — the standard workaround. Restricted to
-// clinical staff; a patient token (mintable by anyone via /api/session/scan) is
-// not enough.
-function requireClinicalSse(req, res, next) {
-  const header = req.headers.authorization || '';
-  const raw = header.startsWith('Bearer ') ? header.slice(7) : (req.query.token || header);
-  if (!raw) return res.status(401).json({ error: 'No token provided' });
+// §8e — EventSource can't send an Authorization header, so the clinician JWT is
+// passed as ?token=<jwt> (the same short-lived login token used everywhere else)
+// and verified here. Only doctor/admin roles may subscribe to the RED-triage feed.
+router.get('/stream', (req, res) => {
+  const token = req.query.token;
+  if (!token) return res.status(401).json({ error: 'No token provided' });
+  let sd;
   try {
-    const claims = verifyToken(raw);
-    if (claims.role !== 'doctor' && claims.role !== 'admin') {
-      return res.status(403).json({ error: 'Forbidden: insufficient role' });
-    }
-    req.session_data = claims;
-    next();
+    sd = verifyToken(String(token));
   } catch {
     return res.status(401).json({ error: 'Invalid token' });
   }
-}
+  if (!sd || !['doctor', 'admin'].includes(sd.role)) {
+    return res.status(403).json({ error: 'Forbidden: insufficient role' });
+  }
 
-router.get('/stream', requireClinicalSse, (req, res) => {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',

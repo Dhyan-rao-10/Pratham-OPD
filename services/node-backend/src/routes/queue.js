@@ -7,15 +7,15 @@ const router = Router();
 // PUBLIC waiting-room board for a department — like a standard government-OPD
 // "Now Serving" display. No auth, so it must expose token numbers ONLY.
 //
+//   now_serving = visits a doctor has opened (being consulted), not yet dispatched
+//   waiting     = completed pre-consults not yet picked up (urgent-first, then arrival)
+//
 // triage_level MUST NOT be selected here. It is health data about an identifiable
 // person: a token becomes a face the moment it is called, so publishing acuity on
 // a screen in a crowded waiting area discloses a patient's clinical status to
 // everyone present — sensitive personal data under the DPDP Act 2023, with no
 // consent basis. Triage stays in the ORDER BY (call priority is the point) but
 // never leaves the server.
-//
-//   now_serving = visits a doctor has opened (being consulted), not yet dispatched
-//   waiting     = completed pre-consults not yet picked up (urgent-first, then arrival)
 //
 // Triage ordering mirrors the doctor dashboard's call order; if mentors choose a
 // strict first-come-first-served policy later, only the ORDER BY changes.
@@ -67,11 +67,11 @@ router.get('/board', async (req, res) => {
 });
 
 // PUBLIC "last issued token" per department — lets the kiosk department picker
-// show how far each department has counted today (e.g. OPD-042) so a patient can
+// show how far each department has counted today (e.g. CARD-042) so a patient can
 // gauge how busy it is before choosing. Token numbers only, no PHI, no auth (same
 // contract as /board). Reads the same daily counter (queue_counters) that
 // /register increments; label format mirrors session.js exactly (DEPT-NNN).
-//   ?department=OPD → that one department
+//   ?department=CARD → that one department
 //   (no param)       → every department that has issued a token today (one call)
 router.get('/last', async (req, res) => {
   try {

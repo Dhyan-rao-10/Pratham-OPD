@@ -270,46 +270,45 @@ function HISDashboard() {
     <div style={{ maxWidth: 1400, margin: '0 auto', padding: 16, minHeight: '100vh' }}>
       {toastView}
       <style>{`@keyframes spin { from { transform: rotate(0) } to { transform: rotate(360deg) } }`}</style>
-      {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
+      {/* Header — title on the left; Refresh + Settings (gear) grouped top-right. */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14, flexWrap: 'wrap' }}>
         <h1 style={{ fontSize: 'calc(20px * var(--fs))', color: 'var(--primary)' }}>🏥 HIS Dashboard</h1>
         <span style={{ fontSize: 'calc(13px * var(--fs))', color: 'var(--text-light)' }}>Hospital Information System</span>
-        {/* Global refresh — reloads whichever tab is active; spins briefly on click. */}
-        <button onClick={refreshActive} disabled={refreshing}
-          title="Refresh" aria-label="Refresh"
-          style={{ display: 'inline-flex', alignItems: 'center', gap: 4, height: 36, padding: '0 14px', borderRadius: 18, border: '1px solid #d5dce4', background: '#fff', color: 'var(--secondary)', cursor: refreshing ? 'default' : 'pointer', fontSize: 'calc(13px * var(--fs))', fontWeight: 600, lineHeight: 1, opacity: refreshing ? 0.7 : 1 }}>
-          <span style={{ display: 'inline-block', fontSize: 'calc(15px * var(--fs))', animation: refreshing ? 'spin 0.7s linear infinite' : 'none' }}>↻</span>
-          {refreshing ? 'Refreshing' : 'Refresh'}
-        </button>
-        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <button className={`btn ${tab === 'sessions' ? 'btn-primary' : 'btn-outline'}`}
-            style={{ fontSize: 'calc(13px * var(--fs))', minHeight: 36, width: 'auto', padding: '0 16px' }}
-            onClick={() => setTab('sessions')}>Patients</button>
-          <button className={`btn ${tab === 'analytics' ? 'btn-primary' : 'btn-outline'}`}
-            style={{ fontSize: 'calc(13px * var(--fs))', minHeight: 36, width: 'auto', padding: '0 16px' }}
-            onClick={() => setTab('analytics')}>Analytics</button>
-          <button className={`btn ${tab === 'departments' ? 'btn-primary' : 'btn-outline'}`}
-            style={{ fontSize: 'calc(13px * var(--fs))', minHeight: 36, width: 'auto', padding: '0 16px' }}
-            onClick={() => setTab('departments')}>Departments</button>
-          <button className={`btn ${tab === 'doctors' ? 'btn-primary' : 'btn-outline'}`}
-            style={{ fontSize: 'calc(13px * var(--fs))', minHeight: 36, width: 'auto', padding: '0 16px' }}
-            onClick={() => setTab('doctors')}>Doctors</button>
-          <button className={`btn ${tab === 'questions' ? 'btn-primary' : 'btn-outline'}`}
-            style={{ fontSize: 'calc(13px * var(--fs))', minHeight: 36, width: 'auto', padding: '0 16px' }}
-            onClick={() => setTab('questions')}>Questionnaires</button>
-          <button className={`btn ${tab === 'protocols' ? 'btn-primary' : 'btn-outline'}`}
-            style={{ fontSize: 'calc(13px * var(--fs))', minHeight: 36, width: 'auto', padding: '0 16px' }}
-            onClick={() => setTab('protocols')}>Protocols</button>
-          <button className={`btn ${tab === 'formulary' ? 'btn-primary' : 'btn-outline'}`}
-            style={{ fontSize: 'calc(13px * var(--fs))', minHeight: 36, width: 'auto', padding: '0 16px' }}
-            onClick={() => setTab('formulary')}>Drug Formulary</button>
-          <button className={`btn ${tab === 'rxtemplate' ? 'btn-primary' : 'btn-outline'}`}
-            style={{ fontSize: 'calc(13px * var(--fs))', minHeight: 36, width: 'auto', padding: '0 16px' }}
-            onClick={() => setTab('rxtemplate')}>Rx Template</button>
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+          {/* Global refresh — reloads whichever tab is active; spins briefly on click. */}
+          <button onClick={refreshActive} disabled={refreshing}
+            title="Refresh" aria-label="Refresh"
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 4, height: 36, padding: '0 14px', borderRadius: 18, border: '1px solid #d5dce4', background: '#fff', color: 'var(--secondary)', cursor: refreshing ? 'default' : 'pointer', fontSize: 'calc(13px * var(--fs))', fontWeight: 600, lineHeight: 1, opacity: refreshing ? 0.7 : 1 }}>
+            <span style={{ display: 'inline-block', fontSize: 'calc(15px * var(--fs))', animation: refreshing ? 'spin 0.7s linear infinite' : 'none' }}>↻</span>
+            {refreshing ? 'Refreshing' : 'Refresh'}
+          </button>
+          {/* Settings — a gear (not a main tab). Highlighted ring when its panel is open. */}
+          <button onClick={() => setTab(tab === 'settings' ? 'sessions' : 'settings')}
+            title="Settings" aria-label="Settings" aria-pressed={tab === 'settings'}
+            style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 36, height: 36, borderRadius: 18, cursor: 'pointer', fontSize: 'calc(17px * var(--fs))', lineHeight: 1,
+              border: tab === 'settings' ? '2px solid var(--primary)' : '1px solid #d5dce4',
+              background: tab === 'settings' ? '#eef3f8' : '#fff' }}>
+            ⚙️
+          </button>
         </div>
       </div>
+      {/* Tab bar — equal-width segments spanning the full row edge to edge. */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+        {[
+          ['sessions', 'Patients'], ['analytics', 'Analytics'], ['departments', 'Departments'],
+          ['doctors', 'Doctors'], ['questions', 'Questionnaires'], ['protocols', 'Protocols'],
+          ['formulary', 'Drug Formulary'], ['rxtemplate', 'Rx Template'],
+        ].map(([id, label]) => (
+          <button key={id}
+            className={`btn ${tab === id ? 'btn-primary' : 'btn-outline'}`}
+            style={{ flex: '1 1 0', minWidth: 0, fontSize: 'calc(13px * var(--fs))', minHeight: 38, padding: '0 8px', whiteSpace: 'nowrap' }}
+            onClick={() => setTab(id)}>{label}</button>
+        ))}
+      </div>
 
-      {tab === 'rxtemplate' ? (
+      {tab === 'settings' ? (
+        <SettingsManager key={refreshKey} />
+      ) : tab === 'rxtemplate' ? (
         <RxTemplateManager key={refreshKey} />
       ) : tab === 'formulary' ? (
         <FormularyManager key={refreshKey} />
@@ -529,18 +528,20 @@ function HISDashboard() {
       })()}
 
       <div style={{ display: 'flex', gap: 16 }}>
-        {/* Patient Table */}
-        <div style={{ flex: 1, overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', background: '#fff', borderRadius: 12, overflow: 'hidden', boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}>
+        {/* Patient Table — its own vertical scroll so only the rows move; the
+            page header, tabs and search stay put. The column header sticks to the
+            top of this scroll area. */}
+        <div style={{ flex: 1, overflowX: 'auto', overflowY: 'auto', maxHeight: 'calc(100vh - 190px)', borderRadius: 12, boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', background: '#fff' }}>
             <thead>
               <tr style={{ background: 'var(--primary)', color: '#fff', fontSize: 'calc(13px * var(--fs))' }}>
-                <th style={{ padding: '10px 12px', textAlign: 'left' }}>Patient</th>
-                <th style={{ padding: '10px 12px', textAlign: 'left' }}>Dept</th>
-                <th style={{ padding: '10px 12px', textAlign: 'left' }}>Triage</th>
-                <th style={{ padding: '10px 12px', textAlign: 'left' }}>State</th>
-                <th style={{ padding: '10px 12px', textAlign: 'left' }}>Consult Time</th>
-                <th style={{ padding: '10px 12px', textAlign: 'left' }}>Doctor</th>
-                <th style={{ padding: '10px 12px', textAlign: 'left' }}>Assign / Reassign</th>
+                <th style={{ padding: '10px 12px', textAlign: 'left', position: 'sticky', top: 0, background: 'var(--primary)', zIndex: 1 }}>Patient</th>
+                <th style={{ padding: '10px 12px', textAlign: 'left', position: 'sticky', top: 0, background: 'var(--primary)', zIndex: 1 }}>Dept</th>
+                <th style={{ padding: '10px 12px', textAlign: 'left', position: 'sticky', top: 0, background: 'var(--primary)', zIndex: 1 }}>Triage</th>
+                <th style={{ padding: '10px 12px', textAlign: 'left', position: 'sticky', top: 0, background: 'var(--primary)', zIndex: 1 }}>State</th>
+                <th style={{ padding: '10px 12px', textAlign: 'left', position: 'sticky', top: 0, background: 'var(--primary)', zIndex: 1 }}>Consult Time</th>
+                <th style={{ padding: '10px 12px', textAlign: 'left', position: 'sticky', top: 0, background: 'var(--primary)', zIndex: 1 }}>Doctor</th>
+                <th style={{ padding: '10px 12px', textAlign: 'left', position: 'sticky', top: 0, background: 'var(--primary)', zIndex: 1 }}>Assign / Reassign</th>
               </tr>
             </thead>
             <tbody>
@@ -571,7 +572,7 @@ function HISDashboard() {
                     )}
                   </td>
                   <td style={{ padding: '10px 12px', fontSize: 'calc(13px * var(--fs))' }}>{s.department}</td>
-                  <td style={{ padding: '10px 12px' }}><TriageBadge level={s.triage_level} /></td>
+                  <td style={{ padding: '10px 12px' }}><TriageBadge level={s.triage_level} compact /></td>
                   <td style={{ padding: '10px 12px', fontSize: 'calc(13px * var(--fs))' }}>
                     {(() => { const m = stateMeta(s.display_state); return (
                       <span style={{ padding: '2px 8px', borderRadius: 4, fontSize: 'calc(11px * var(--fs))', background: m.bg, color: m.fg }}>{m.label}</span>
@@ -711,9 +712,9 @@ function HISDashboard() {
                         <span style={{ marginLeft: 'auto', fontSize: 'calc(11px * var(--fs))', color: 'var(--text-light)' }}>{d.created_at ? fmtDateTime(d.created_at) : ''}</span>
                       </div>
                       <div style={{ padding: 12 }}>
-                        {d.image_key ? (
-                          <a href={`/api/ocr/documents/image/${d.id}`} target="_blank" rel="noreferrer">
-                            <img src={`/api/ocr/documents/image/${d.id}`} alt="uploaded document"
+                        {d.image_url ? (
+                          <a href={d.image_url} target="_blank" rel="noreferrer">
+                            <img src={d.image_url} alt="uploaded document"
                               style={{ width: '100%', objectFit: 'contain', borderRadius: 6, border: '1px solid #EEF2F6', background: '#fff', cursor: 'zoom-in' }} />
                           </a>
                         ) : (
@@ -831,7 +832,7 @@ function DoctorInfo({ doctors = [], depts = [], onChange = () => {} }) {
     return acc;
   }, { total: 0, completed: 0, active: 0, severe: 0 });
 
-  const th = { padding: '11px 14px', textAlign: 'left', fontSize: 'calc(12px * var(--fs))', fontWeight: 700, letterSpacing: 0.3, whiteSpace: 'nowrap' };
+  const th = { padding: '11px 14px', textAlign: 'left', fontSize: 'calc(12px * var(--fs))', fontWeight: 700, letterSpacing: 0.3, whiteSpace: 'nowrap', position: 'sticky', top: 0, background: 'var(--primary)', zIndex: 1 };
   const td = { padding: '11px 14px', fontSize: 'calc(13px * var(--fs))', whiteSpace: 'nowrap' };
   const numChip = (n, color) => (
     <span style={{ fontWeight: 700, color: n ? color : 'var(--text-light)' }}>{n}</span>
@@ -904,8 +905,8 @@ function DoctorInfo({ doctors = [], depts = [], onChange = () => {} }) {
         </button>
       </div>
 
-      <div style={{ overflowX: 'auto' }}>
-        <table style={{ width: '100%', borderCollapse: 'collapse', background: '#fff', borderRadius: 12, overflow: 'hidden', boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}>
+      <div style={{ overflowX: 'auto', overflowY: 'auto', maxHeight: 'calc(100vh - 230px)', borderRadius: 12, boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', background: '#fff' }}>
           <thead>
             <tr style={{ background: 'var(--primary)', color: '#fff' }}>
               <th style={th}>Doctor</th>
@@ -1044,9 +1045,7 @@ function DoctorInfo({ doctors = [], depts = [], onChange = () => {} }) {
 
 // Add-doctor modal — opened from the Doctors hub. Clean centered card overlay.
 function AddDoctorModal({ depts = [], onClose, onAdded }) {
-  // No hardcoded fallback: with no departments yet, leave it blank and let the
-  // required <select> stop the submit, rather than naming one that does not exist.
-  const [form, setForm] = useState({ name: '', department: depts.find(d => d.is_active)?.code || '', phone: '', pin: '', registration_no: '' });
+  const [form, setForm] = useState({ name: '', department: depts.find(d => d.is_active)?.code || 'CARD', phone: '', pin: '', registration_no: '' });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const titleId = useId();
@@ -1096,8 +1095,9 @@ function AddDoctorModal({ depts = [], onClose, onAdded }) {
           </div>
           <div>
             <label style={{ fontSize: 'calc(12px * var(--fs))', color: 'var(--text-light)' }}>Phone *</label>
-            <input className="input" type="tel" required value={form.phone}
-              onChange={e => setForm({ ...form, phone: e.target.value })} placeholder="9876500099" />
+            <input className="input" type="tel" inputMode="numeric" maxLength={10} required value={form.phone}
+              onChange={e => setForm({ ...form, phone: e.target.value.replace(/\D/g, '').slice(0, 10) })}
+              placeholder="9876500099" />
           </div>
           <div>
             <label style={{ fontSize: 'calc(12px * var(--fs))', color: 'var(--text-light)' }}>Registration / license no. (optional)</label>
@@ -1131,7 +1131,7 @@ function EditDoctorModal({ doctor, depts = [], onClose, onSaved }) {
   const titleId = useId();
   const panelRef = useDialogA11y(onClose);
   const [form, setForm] = useState({
-    name: doctor.name || '', department: doctor.department || depts.find(d => d.is_active)?.code || '', phone: doctor.phone || '', pin: '',
+    name: doctor.name || '', department: doctor.department || 'CARD', phone: doctor.phone || '', pin: '',
     registration_no: doctor.registration_no || '',
   });
   const [saving, setSaving] = useState(false);
@@ -1186,8 +1186,9 @@ function EditDoctorModal({ doctor, depts = [], onClose, onSaved }) {
           </div>
           <div>
             <label style={{ fontSize: 'calc(12px * var(--fs))', color: 'var(--text-light)' }}>Phone *</label>
-            <input className="input" type="tel" required value={form.phone}
-              onChange={e => setForm({ ...form, phone: e.target.value })} placeholder="9876500099" />
+            <input className="input" type="tel" inputMode="numeric" maxLength={10} required value={form.phone}
+              onChange={e => setForm({ ...form, phone: e.target.value.replace(/\D/g, '').slice(0, 10) })}
+              placeholder="9876500099" />
           </div>
           <div>
             <label style={{ fontSize: 'calc(12px * var(--fs))', color: 'var(--text-light)' }}>Registration / license no.</label>
@@ -1216,10 +1217,8 @@ function EditDoctorModal({ doctor, depts = [], onClose, onSaved }) {
 }
 
 
-// `department` is always overwritten by startNew() with the selected dept; keep it
-// blank rather than naming a department that may not exist in this hospital.
 const EMPTY_Q = {
-  id: '', department: '', text_en: '', text_hi: '', text_te: '',
+  id: '', department: 'CARD', text_en: '', text_hi: '', text_te: '',
   q_type: 'BOOLEAN', options_json: null, required: true,
   triage_flag: '', triage_answer: '', next_default: '', next_rules: [],
   sort_order: 0,
@@ -1228,12 +1227,7 @@ const EMPTY_Q = {
 const Q_TYPES = ['BOOLEAN', 'SINGLE_SELECT', 'MULTI_SELECT', 'FREE_TEXT', 'NUMERIC', 'TERMINAL'];
 
 function QuestionsManager({ depts = [] }) {
-  // Never hardcode a department code. `depts` arrives asynchronously, so a
-  // useState initializer would latch whatever was there on the first render.
-  // A stale code (this used to be 'CARD') makes the <select> show its first
-  // option while `dept` still holds the missing code — so the dropdown reads
-  // "General OPD" and the question list silently comes back empty.
-  const [dept, setDept] = useState('');
+  const [dept, setDept] = useState('CARD');
   const [questions, setQuestions] = useState([]);
   const [editing, setEditing] = useState(null); // null = list view, object = form
   const [saving, setSaving] = useState(false);
@@ -1242,18 +1236,9 @@ function QuestionsManager({ depts = [] }) {
   const { confirm, dialog } = useConfirm();
   const { toast, toastView } = useToast();
 
-  // Adopt the first active department once they load, and recover if the one we
-  // were showing gets deactivated or deleted.
-  useEffect(() => {
-    const active = depts.filter(d => d.is_active);
-    if (!active.length) { setDept(''); return; }
-    if (!active.some(d => d.code === dept)) setDept(active[0].code);
-  }, [depts, dept]);
-
   useEffect(() => { loadQuestions(); }, [dept]);
 
   async function loadQuestions() {
-    if (!dept) { setQuestions([]); return; }
     // TERMINAL nodes are vestigial DAG sinks, not real questions — the patient's
     // "done" is the /patient/done page. Hide them from the editor list.
     try { setQuestions((await api.getQuestions(dept)).filter(q => q.q_type !== 'TERMINAL')); } catch {}
@@ -1680,15 +1665,67 @@ function DepartmentsManager({ depts, onChange }) {
     }
   }
 
+  // Hide a department from the patient picker without destroying anything. The
+  // reversible option, and the right one in almost every case — a department with
+  // patient visits cannot be deleted at all, only deactivated.
+  async function handleToggleActive(d) {
+    try {
+      await api.updateDepartment(d.code, { is_active: !d.is_active });
+      toast(d.is_active ? `"${d.code}" deactivated — hidden from patients` : `"${d.code}" reactivated`, 'success');
+      onChange();
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  }
+
   async function handleDelete(code) {
+    let impact;
+    try {
+      impact = await api.departmentImpact(code);
+    } catch (err) {
+      toast(err.message, 'error');
+      return;
+    }
+
+    // Patient visits are clinical records — never collateral damage of a config
+    // change. Say so plainly and point at the reversible option instead of letting
+    // the admin type the code and then hit a 409.
+    if (!impact.deletable) {
+      await confirm({
+        title: `"${code}" cannot be deleted`,
+        icon: '🛑',
+        message: `${impact.sessions} patient visit${impact.sessions === 1 ? '' : 's'} reference this department, and deleting it would strand those records. `
+               + `Deactivate it instead — it disappears from the patient picker immediately, every visit stays intact, and you can reactivate it any time.`,
+        confirmLabel: 'Got it',
+        hideCancel: true,
+        danger: true,
+      });
+      return;
+    }
+
+    const losses = [
+      impact.questions > 0 && `${impact.questions} questionnaire question${impact.questions === 1 ? '' : 's'} will be permanently deleted`,
+      impact.doctors > 0 && `${impact.doctors} doctor${impact.doctors === 1 ? ' will be' : 's will be'} deactivated and unable to log in (you can reactivate them into another department)`,
+    ].filter(Boolean);
+
     if (!(await confirm({
-      title: `Delete department "${code}"?`,
-      message: 'Only possible if no doctors, patients, or questions are linked to it.',
-      confirmLabel: 'Delete',
+      title: `Permanently delete "${code}"?`,
+      icon: '⚠️',
+      message: losses.length
+        ? `This cannot be undone. ${losses.join('. ')}.`
+        : 'This cannot be undone.',
+      confirmText: code,
+      confirmLabel: 'Delete this department',
       danger: true,
     }))) return;
+
     try {
-      await api.deleteDepartment(code);
+      const r = await api.forceDeleteDepartment(code, code);
+      const done = [
+        r.questions_deleted > 0 && `${r.questions_deleted} question(s) deleted`,
+        r.doctors_deactivated > 0 && `${r.doctors_deactivated} doctor(s) deactivated`,
+      ].filter(Boolean);
+      toast(`"${code}" deleted${done.length ? ` — ${done.join(', ')}` : ''}`, 'success');
       onChange();
     } catch (err) {
       toast(err.message, 'error');
@@ -1829,14 +1866,15 @@ function DepartmentsManager({ depts, onChange }) {
       {/* Department list */}
       <div style={{ flex: 1 }}>
         <h3 style={{ fontSize: 'calc(16px * var(--fs))', marginBottom: 12, color: 'var(--primary)' }}>Departments ({depts.length})</h3>
-        <table style={{ width: '100%', borderCollapse: 'collapse', background: '#fff', borderRadius: 12, overflow: 'hidden', boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}>
+        <div style={{ overflowX: 'auto', overflowY: 'auto', maxHeight: 'calc(100vh - 220px)', borderRadius: 12, boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', background: '#fff' }}>
           <thead>
             <tr style={{ background: 'var(--primary)', color: '#fff', fontSize: 'calc(13px * var(--fs))' }}>
-              <th style={{ padding: '10px 12px', textAlign: 'left' }}>Icon</th>
-              <th style={{ padding: '10px 12px', textAlign: 'left' }}>Code</th>
-              <th style={{ padding: '10px 12px', textAlign: 'left' }}>Name</th>
-              <th style={{ padding: '10px 12px', textAlign: 'left' }}>Collect Vitals</th>
-              <th style={{ padding: '10px 12px', textAlign: 'left' }}>Actions</th>
+              <th style={{ padding: '10px 12px', textAlign: 'left', position: 'sticky', top: 0, background: 'var(--primary)', zIndex: 1 }}>Icon</th>
+              <th style={{ padding: '10px 12px', textAlign: 'left', position: 'sticky', top: 0, background: 'var(--primary)', zIndex: 1 }}>Code</th>
+              <th style={{ padding: '10px 12px', textAlign: 'left', position: 'sticky', top: 0, background: 'var(--primary)', zIndex: 1 }}>Name</th>
+              <th style={{ padding: '10px 12px', textAlign: 'left', position: 'sticky', top: 0, background: 'var(--primary)', zIndex: 1 }}>Collect Vitals</th>
+              <th style={{ padding: '10px 12px', textAlign: 'left', position: 'sticky', top: 0, background: 'var(--primary)', zIndex: 1 }}>Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -1868,7 +1906,15 @@ function DepartmentsManager({ depts, onChange }) {
                           color: (d.report_focus && d.report_focus.trim()) ? 'var(--primary)' : 'var(--text-light)' }}>
                         {(d.report_focus && d.report_focus.trim()) ? '📝 Report focus' : '＋ Report focus'}
                       </button>
+                      <button onClick={() => handleToggleActive(d)}
+                        title={d.is_active
+                          ? 'Hide from the patient department picker. Nothing is deleted; reversible.'
+                          : 'Show in the patient department picker again.'}
+                        style={{ background: 'none', border: '1px solid #E0E0E0', color: 'var(--text-light)', borderRadius: 6, padding: '4px 10px', cursor: 'pointer', fontSize: 'calc(12px * var(--fs))' }}>
+                        {d.is_active ? '🚫 Deactivate' : '✅ Reactivate'}
+                      </button>
                       <button onClick={() => handleDelete(d.code)}
+                        title="Permanently delete this department. Blocked while any patient visit references it."
                         style={{ background: 'none', border: '1px solid var(--red)', color: 'var(--red)', borderRadius: 6, padding: '4px 10px', cursor: 'pointer', fontSize: 'calc(12px * var(--fs))' }}>
                         Delete
                       </button>
@@ -1878,6 +1924,7 @@ function DepartmentsManager({ depts, onChange }) {
             ))}
           </tbody>
         </table>
+        </div>
         {depts.length === 0 && (
           <p style={{ textAlign: 'center', color: 'var(--text-light)', padding: 32 }}>No departments yet</p>
         )}
@@ -1888,10 +1935,7 @@ function DepartmentsManager({ depts, onChange }) {
 
 
 function ProtocolsManager({ depts = [] }) {
-  // `depts` loads asynchronously and a useState initializer runs exactly once, so
-  // `depts[0]?.code || 'CARD'` latched to 'CARD' on the first render and never
-  // recovered. Sync it in an effect instead. See QuestionsManager for the same fix.
-  const [dept, setDept] = useState('');
+  const [dept, setDept] = useState(depts[0]?.code || 'CARD');
   const [protocols, setProtocols] = useState([]);
   const [editing, setEditing] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -1900,16 +1944,9 @@ function ProtocolsManager({ depts = [] }) {
   const { confirm, dialog } = useConfirm();
   const { toast, toastView } = useToast();
 
-  useEffect(() => {
-    const active = depts.filter(d => d.is_active);
-    if (!active.length) { setDept(''); return; }
-    if (!active.some(d => d.code === dept)) setDept(active[0].code);
-  }, [depts, dept]);
-
   useEffect(() => { loadProtocols(); }, [dept]);
 
   async function loadProtocols() {
-    if (!dept) { setProtocols([]); return; }
     try { setProtocols(await api.getProtocols(dept)); } catch {}
   }
 
@@ -2011,6 +2048,7 @@ function ProtocolsManager({ depts = [] }) {
 
         <p style={{ fontSize: 'calc(12px * var(--fs))', color: 'var(--text-light)', marginBottom: 8 }}>{protocols.length} active protocols</p>
 
+        <div style={{ overflowY: 'auto', maxHeight: 'calc(100vh - 260px)', paddingRight: 4 }}>
         {protocols.map(p => (
           <div key={p.id} onClick={() => startEdit(p)}
             style={{
@@ -2031,6 +2069,7 @@ function ProtocolsManager({ depts = [] }) {
             )}
           </div>
         ))}
+        </div>
 
         {protocols.length === 0 && (
           <p style={{ textAlign: 'center', color: 'var(--text-light)', padding: 32, fontSize: 'calc(13px * var(--fs))' }}>
@@ -2452,7 +2491,7 @@ function gist(text, n = 130) {
 // ── Rx Template manager: hospital prescription branding/theme/toggles + live preview ──
 const RX_SAMPLE = {
   patient: 'Ravi Kumar', patient_age: 42, patient_gender: 'M', patient_phone: '9876543210',
-  doctor: 'Dr. A. Sharma', doctor_registration: 'KMC-12345', department: 'General',
+  doctor: 'Dr. Priya Sharma', doctor_registration: 'KMC-12345', department: 'CARD',
   items: [
     { drug: 'Paracetamol 500mg', dose: '1 tab', freq: 'TID', duration: '5 days', instructions: 'After food' },
     { drug: 'Amoxicillin 250mg', dose: '1 cap', freq: 'BD', duration: '7 days', instructions: '' },
@@ -2460,6 +2499,84 @@ const RX_SAMPLE = {
   notes: 'Plenty of fluids and rest. Review in 1 week if symptoms persist.',
   rx_id: 'SAMPLE-0000', issued_at: new Date().toISOString(),
 };
+
+// Hospital-wide feature settings. Currently just the global OCR/document-scanning
+// toggle — flipping it off stops the paid AI/OCR extraction across ALL departments
+// (the patient flow hides the upload step; the python OCR endpoint also refuses).
+// Per-department control is intentionally deferred until requested.
+function SettingsManager() {
+  const [settings, setSettings] = useState(null);   // null = loading
+  const [saving, setSaving] = useState(false);
+  const { toast, toastView } = useToast();
+
+  useEffect(() => {
+    api.getAdminSettings()
+      .then(s => setSettings({ ocr_enabled: s.ocr_enabled !== false }))
+      .catch(() => setSettings({ ocr_enabled: true }));
+  }, []);
+
+  async function setOcr(next) {
+    if (saving) return;
+    const prev = settings;
+    setSettings({ ...settings, ocr_enabled: next });   // optimistic
+    setSaving(true);
+    try {
+      const s = await api.updateSettings({ ocr_enabled: next });
+      setSettings({ ocr_enabled: s.ocr_enabled !== false });
+      toast(next ? 'OCR / document scanning turned ON' : 'OCR / document scanning turned OFF', 'success');
+    } catch (e) {
+      setSettings(prev);   // revert on failure
+      toast('Could not update setting: ' + (e.message || ''), 'error');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!settings) return <p style={{ color: 'var(--text-light)', padding: 24 }}>Loading settings…</p>;
+
+  const on = settings.ocr_enabled;
+
+  return (
+    <div style={{ padding: '8px 4px', maxWidth: 640 }}>
+      {toastView}
+      <div style={{ background: 'var(--card-bg)', border: '1px solid #E2E8F0', borderRadius: 12, padding: 20 }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
+          <div style={{ flex: 1, minWidth: 240 }}>
+            <h3 style={{ margin: '0 0 6px', fontSize: 'calc(16px * var(--fs))', color: 'var(--primary)' }}>Document scanning (OCR)</h3>
+            <p style={{ margin: 0, fontSize: 'calc(13px * var(--fs))', color: 'var(--text-light)', lineHeight: 1.5 }}>
+              When ON, uploaded prescriptions and reports are read by AI/OCR and the extracted
+              medicines, lab values and allergies are added to the doctor's report. When OFF,
+              patients can still upload — the files are shown to the doctor as-is, but no AI
+              extraction runs, avoiding the per-scan API cost. Applies to all departments.
+            </p>
+          </div>
+          {/* Toggle switch */}
+          <button
+            role="switch"
+            aria-checked={on}
+            aria-label="Toggle document scanning (OCR)"
+            disabled={saving}
+            onClick={() => setOcr(!on)}
+            style={{
+              flexShrink: 0, position: 'relative', width: 56, height: 32, borderRadius: 16,
+              border: 'none', cursor: saving ? 'default' : 'pointer', opacity: saving ? 0.6 : 1,
+              background: on ? 'var(--accent)' : '#C4CDD5', transition: 'background 0.15s',
+            }}>
+            <span style={{
+              position: 'absolute', top: 3, left: on ? 27 : 3, width: 26, height: 26, borderRadius: '50%',
+              background: '#fff', boxShadow: '0 1px 3px rgba(0,0,0,0.3)', transition: 'left 0.15s',
+            }} />
+          </button>
+        </div>
+        <div style={{ marginTop: 14, display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 'calc(13px * var(--fs))', fontWeight: 600,
+          color: on ? 'var(--green)' : 'var(--text-light)' }}>
+          <span style={{ width: 9, height: 9, borderRadius: '50%', background: on ? 'var(--green)' : '#B0B8C1' }} />
+          {on ? 'Enabled — uploads are read by AI/OCR' : 'Disabled — uploads shown to doctor as-is, no AI extraction'}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function RxTemplateManager() {
   const [cfg, setCfg] = useState(null);

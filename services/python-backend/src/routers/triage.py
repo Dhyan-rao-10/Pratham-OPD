@@ -1,10 +1,12 @@
 import os
 import json
-from fastapi import APIRouter, Depends, HTTPException
+import logging
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
-from ..auth import require_auth, assert_session_access
 from ..db import query, execute
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/triage", tags=["triage"])
 
@@ -42,11 +44,7 @@ class TriageResponse(BaseModel):
     triggered_rules: list
 
 @router.post("/evaluate", response_model=TriageResponse)
-async def evaluate(req: TriageRequest, claims: dict = Depends(require_auth)):
-    # Writes triage_level onto the session and can fire a RED nursing alert —
-    # scope it to the caller's own session unless they are clinical staff.
-    assert_session_access(req.session_id, claims)
-
+async def evaluate(req: TriageRequest):
     # Load answers
     answers_rows = query(
         "SELECT question_id, answer_raw FROM session_answers WHERE session_id = %s",
@@ -125,18 +123,20 @@ async def evaluate(req: TriageRequest, claims: dict = Depends(require_auth)):
         r = _get_redis()
         if r:
             try:
-                # Get patient info for the alert
-                session_rows = query("SELECT patient_name, department FROM sessions WHERE id = %s", (req.session_id,))
-                patient_info = session_rows[0] if session_rows else {}
+                # §8e — the alert broadcast is PHI-free: session_id + department +
+                # triage only. The nursing dashboard resolves the patient name via
+                # an authenticated call keyed on session_id (never over the SSE feed,
+                # which any connected client could otherwise read).
+                session_rows = query("SELECT department FROM sessions WHERE id = %s", (req.session_id,))
+                dept = session_rows[0].get("department", "") if session_rows else ""
                 alert = json.dumps({
                     "session_id": req.session_id,
                     "level": level,
                     "triggered_rules": triggered,
-                    "patient_name": patient_info.get("patient_name", "Unknown"),
-                    "department": patient_info.get("department", ""),
+                    "department": dept,
                 })
                 r.publish("triage_alerts", alert)
-            except Exception as e:
-                print(f"[triage] Redis publish failed: {e}", flush=True)
+            except Exception:
+                logger.warning("triage Redis publish failed", exc_info=True)
 
     return TriageResponse(level=level, triggered_rules=triggered)

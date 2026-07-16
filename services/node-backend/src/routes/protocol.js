@@ -1,13 +1,14 @@
 const { Router } = require('express');
 const pool = require('../models/db');
 const { sendServerError } = require('../utils/http');
-const { authMiddleware, requireRole } = require('../middleware/auth');
-const { requireSessionAccess } = require('../middleware/ownership');
+const { authMiddleware, requireRole, requireSessionOwnership } = require('../middleware/auth');
 
 const router = Router();
 
-// Admin-only guard for protocol authoring (create/update/delete). Reads
-// (list / get / evaluate) stay open so the patient flow can evaluate protocols.
+// Admin-only guard for protocol authoring (create/update/delete). The protocol
+// LIST and GET stay open — they are department config (trigger rules, pre-visit
+// messages), not patient data. `evaluate` reads a session's answers, so it needs
+// a token (§5a).
 const adminOnly = [authMiddleware, requireRole('admin')];
 
 // List protocols (optionally filter by department)
@@ -108,8 +109,9 @@ router.delete('/:id', ...adminOnly, async (req, res) => {
   }
 });
 
-// Evaluate which protocols apply to a session — reads the session's answers (PHI).
-router.get('/evaluate/:session_id', authMiddleware, requireSessionAccess(), async (req, res) => {
+// Evaluate which protocols apply to a session — own session (patient) or any
+// (clinician) (§5c).
+router.get('/evaluate/:session_id', authMiddleware, requireSessionOwnership('session_id'), async (req, res) => {
   try {
     const sessionId = req.params.session_id;
 

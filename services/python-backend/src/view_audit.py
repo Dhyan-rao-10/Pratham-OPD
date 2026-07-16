@@ -6,7 +6,8 @@ opened this patient's record" event. We stamp it into the SAME `audit_log`
 table node-backend already uses (event_type = 'patient_viewed'), so there's one
 unified access trail (logins, consultation actions, and now views).
 
-Two design constraints (useful only if it won't clutter or slow down the app):
+Two design constraints from the pilot checklist ("useful IF it won't clutter or
+slow down the app"):
 
   * No clutter — an in-memory dedup window collapses repeated fetches of the same
     patient by the same actor (the dashboard re-fetches a report several times per
@@ -15,10 +16,13 @@ Two design constraints (useful only if it won't clutter or slow down the app):
     never delay or break serving the report. No new table, index, or dependency.
 """
 import json
+import logging
 import os
 import time
 
 from .db import execute
+
+logger = logging.getLogger(__name__)
 
 # How long to suppress duplicate view rows for the same (actor, session), seconds.
 _DEDUP_WINDOW_S = int(os.getenv("VIEW_AUDIT_DEDUP_SECONDS", "300"))
@@ -69,5 +73,30 @@ def record_view(session_id: str, claims: dict) -> None:
                VALUES (%s, 'patient_viewed', %s, %s::jsonb)""",
             (session_id, str(actor), json.dumps({"via": "report", "role": role})),
         )
-    except Exception as e:  # never let auditing break the actual request
-        print(f"[view_audit] non-fatal: {type(e).__name__}: {e}", flush=True)
+    except Exception:  # never let auditing break the actual request
+        logger.warning("view_audit non-fatal error", exc_info=True)
+
+
+def record_event(event_type: str, actor: str, session_id=None, extra: dict = None, dedup_key: str = None) -> None:
+    """§6a — generic PHI-free audit write, same non-blocking dedup window as
+    record_view. Use for document-image views, audio playback, etc. `extra` and
+    the payload must contain IDs only (never names/phones/transcripts). `dedup_key`
+    collapses repeated identical events (e.g. an <img> re-fetched on each render)
+    within the window; defaults to the session id.
+    """
+    try:
+        now = time.monotonic()
+        key = ("evt", event_type, dedup_key or session_id or "")
+        last = _last_logged.get(key)
+        if last is not None and (now - last) < _DEDUP_WINDOW_S:
+            return
+        if len(_last_logged) > _MAX_ENTRIES:
+            _last_logged.clear()
+        _last_logged[key] = now
+        execute(
+            """INSERT INTO audit_log (session_id, event_type, actor, payload)
+               VALUES (%s, %s, %s, %s::jsonb)""",
+            (session_id, event_type, str(actor), json.dumps(extra or {})),
+        )
+    except Exception:
+        logger.warning("view_audit record_event non-fatal", exc_info=True)

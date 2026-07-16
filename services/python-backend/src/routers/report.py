@@ -3,7 +3,6 @@ import re
 import json
 import uuid
 import logging
-import traceback
 from datetime import datetime
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, Depends
@@ -12,16 +11,16 @@ from typing import Optional
 import anthropic
 
 from ..db import query, execute
-from ..auth import require_auth, require_role, assert_session_access
+from ..auth import require_auth, enforce_ownership
+from ..ratelimit import rate_limit
 from ..view_audit import record_view
-
-router = APIRouter(prefix="/api/report", tags=["report"])
 
 logger = logging.getLogger(__name__)
 
-# Reading/editing a finished report is a clinician action (doctor console + HIS).
-# Patients never fetch a report — they only trigger /generate for their own session.
-clinical_only = [Depends(require_role("doctor", "admin"))]
+router = APIRouter(prefix="/api/report", tags=["report"])
+
+# §8c — report generation runs a cloud LLM; cap per client to limit cost-abuse.
+_rl_report = rate_limit("report_generate", default_max=20, default_window=60)
 
 PROMPT_DIR = Path(__file__).parent.parent / "prompts"
 
@@ -32,19 +31,19 @@ class ReportRequest(BaseModel):
     # sets it, because the vitals just changed and the report must reflect them.
     force: bool = False
 
-@router.post("/generate")
+@router.post("/generate", dependencies=[Depends(_rl_report)])
 async def generate_report(req: ReportRequest, claims: dict = Depends(require_auth)):
-    # Generating flips the session to COMPLETE (see _generate_report_impl), so an
-    # unscoped session_id let any caller force any patient's session into the queue.
-    assert_session_access(req.session_id, claims)
+    # §5c — a patient may only (re)generate their OWN report; clinicians any.
+    enforce_ownership(claims, req.session_id)
     try:
         return await _generate_report_impl(req)
     except HTTPException:
         raise
-    except Exception as e:
-        print(f"[report.generate] ERROR for session {req.session_id}: {type(e).__name__}: {e}", flush=True)
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {str(e)}")
+    except Exception:
+        # §4a — log full detail server-side; return a generic message so DB/driver
+        # internals never reach the client.
+        logger.exception("report.generate failed for session %s", req.session_id)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 async def _generate_report_impl(req: ReportRequest):
@@ -108,6 +107,7 @@ async def _generate_report_impl(req: ReportRequest):
     documents_data = []
     all_doc_meds = []
     all_doc_labs = []
+    all_doc_allergies = []   # allergen -> source doc type (OCR-extracted, AI, needs verify)
     for doc in docs:
         structured = doc.get("ocr_structured") or {}
         if isinstance(structured, str):
@@ -135,6 +135,12 @@ async def _generate_report_impl(req: ReportRequest):
                 l["source_doc_type"] = doc.get("doc_type")
                 l["source_date"] = str(doc.get("created_at", ""))[:10]
             all_doc_labs.extend(labs)
+
+        allergies = [str(a).strip() for a in (structured.get("allergies") or []) if str(a).strip()]
+        if allergies:
+            doc_entry["allergies"] = allergies
+            for a in allergies:
+                all_doc_allergies.append({"allergen": a, "source_doc_type": doc.get("doc_type")})
 
         # High-value clinical context the OCR already extracts but that was being
         # dropped before reaching the report LLM. These feed the interpretive
@@ -180,15 +186,20 @@ async def _generate_report_impl(req: ReportRequest):
         "documents": documents_data,
         "medications_from_documents": all_doc_meds,
         "lab_values_from_documents": all_doc_labs,
+        "allergies_from_documents": all_doc_allergies,
     }
 
-    # Generate report via LLM or fallback
+    # Generate report. HYBRID: the LLM writes ONLY the interpretive sections
+    # (Quick Summary, Chief Complaint & History, Past Medical History, Lab Results).
+    # The exact pass-through sections (Medications, Allergies, Vitals, Documents
+    # Reviewed) are rendered verbatim from the data in Python — never sent through
+    # the LLM — so they can't be paraphrased/hallucinated and cost no output tokens.
     from ..llm_client import has_llm, complete as llm_complete
     report_md = None
     if has_llm():
         try:
             system_prompt = (PROMPT_DIR / "system_report.txt").read_text()
-            # Department-specific emphasis (admin-editable, migration 028). Appended
+            # Department-specific emphasis (admin-editable, migration 029). Appended
             # to the base prompt so the SAME fixed section schema is reused for every
             # department — this only reshapes prioritisation/wording, never the
             # structure or the no-fabrication rule (spelled out in the wrapper below).
@@ -204,9 +215,22 @@ async def _generate_report_impl(req: ReportRequest):
                     f"{focus}"
                 )
             user_content = json.dumps(session_json, indent=2, default=str)
-            report_md = llm_complete(system_prompt, user_content, max_tokens=2048)
-        except Exception as e:
-            print(f"[report] LLM call failed: {type(e).__name__}: {e}", flush=True)
+            # When no documents were scanned (OCR off, or nothing uploaded), tell the
+            # model plainly so it can't reference or invent prescription/lab/document
+            # content anywhere in the interpretive sections.
+            if not session_json.get("documents"):
+                user_content += (
+                    "\n\nNOTE: No documents were scanned for this visit. Do NOT mention, "
+                    "infer, or fabricate any prescription, uploaded-document, or lab-report "
+                    "data anywhere. Base the summary ONLY on the questionnaire answers and vitals."
+                )
+            llm_md = llm_complete(system_prompt, user_content, max_tokens=2048)
+            # Use hybrid assembly only if the LLM returned recognizable sections;
+            # otherwise fall through to the full deterministic report.
+            if llm_md and _split_llm_sections(llm_md):
+                report_md = _assemble_report(llm_md, session_json)
+        except Exception:
+            logger.warning("report LLM call failed; falling back to deterministic report", exc_info=True)
             report_md = None
     if not report_md:
         report_md = _fallback_report(session_json)
@@ -245,8 +269,9 @@ async def _generate_report_impl(req: ReportRequest):
     }
 
 
-@router.get("/{session_id}", dependencies=clinical_only)
+@router.get("/{session_id}")
 async def get_report(session_id: str, claims: dict = Depends(require_auth)):
+    enforce_ownership(claims, session_id)  # §5c
     reports = query(
         "SELECT * FROM session_reports WHERE session_id = %s ORDER BY created_at DESC LIMIT 1",
         (session_id,),
@@ -268,8 +293,9 @@ async def get_report(session_id: str, claims: dict = Depends(require_auth)):
     }
 
 
-@router.post("/{session_id}/feedback", dependencies=clinical_only)
-async def submit_feedback(session_id: str, feedback: dict):
+@router.post("/{session_id}/feedback")
+async def submit_feedback(session_id: str, feedback: dict, claims: dict = Depends(require_auth)):
+    enforce_ownership(claims, session_id)  # §5c
     val = feedback.get("feedback")
     if val not in ("accurate", "inaccurate"):
         raise HTTPException(status_code=400, detail="Feedback must be 'accurate' or 'inaccurate'")
@@ -280,12 +306,13 @@ async def submit_feedback(session_id: str, feedback: dict):
     return {"stored": True}
 
 
-@router.post("/{session_id}/edit", dependencies=clinical_only)
-async def edit_report(session_id: str, body: dict):
+@router.post("/{session_id}/edit")
+async def edit_report(session_id: str, body: dict, claims: dict = Depends(require_auth)):
     """Store the doctor's full edited report markdown for the latest report. The AI
     original (report_md) is preserved untouched; the edited body lives in
     doctor_correction and is shown as the current report. Flags it inaccurate.
     An empty body clears the edit (reverts to the AI original)."""
+    enforce_ownership(claims, session_id)  # §5c
     edited = (body.get("report_md") or "").strip()
     rows = query(
         "SELECT id FROM session_reports WHERE session_id = %s ORDER BY created_at DESC LIMIT 1",
@@ -302,8 +329,16 @@ async def edit_report(session_id: str, body: dict):
     return {"stored": True}
 
 
+# ── Deterministic section renderers ──────────────────────────────────────────
+# These sections are exact pass-through of patient/nurse-entered data (vitals,
+# allergies) or OCR-extracted structured data (medications, documents). They are
+# rendered verbatim in Python — NEVER sent through the LLM — so the numbers/text
+# in the report are guaranteed to match what was entered (no paraphrase or
+# hallucination risk) and cost zero tokens. Shared by BOTH the LLM/hybrid path
+# and the no-LLM fallback so the two always produce identical pass-through blocks.
+
 def _department_report_focus(dept_code):
-    """Specialty-specific report emphasis for a department (migration 028),
+    """Specialty-specific report emphasis for a department (migration 029),
     admin-editable in HIS. Returns the trimmed focus text, or None when unset or
     when the departments table isn't present (older deployments) — the caller then
     uses the base prompt unchanged. Never raises: a lookup failure must not block
@@ -319,6 +354,193 @@ def _department_report_focus(dept_code):
         return None
     focus = (rows[0].get("report_focus") or "").strip()
     return focus or None
+
+
+def _base_answer(answers, role):
+    """Resolve a BASE questionnaire answer by its role, i.e. the id suffix after
+    '_base_'. Base questions are namespaced per department (q_<dept>_base_<role>,
+    e.g. q_card_base_chief_complaint), so we match the suffix rather than a fixed
+    id — otherwise a hardcoded 'q_chief_complaint' never matches and the field
+    always reads 'Not recorded'. Falls back to a bare 'q_<role>' for safety."""
+    suffix = f"_base_{role}"
+    for qid, val in (answers or {}).items():
+        if qid.endswith(suffix) and str(val).strip():
+            return val
+    bare = (answers or {}).get(f"q_{role}")
+    return bare if bare and str(bare).strip() else None
+
+
+def _render_medications(session_json) -> str:
+    """## Current/Prior Medications — grouped by source prescription (OCR), plus
+    any patient-reported meds not already in the documents. 'None' if empty."""
+    answers = session_json.get("answers", {})
+    doc_meds = session_json.get("medications_from_documents", [])
+    patient_meds = _base_answer(answers, "medications") or ""
+    lines = ["## Current/Prior Medications"]
+    if doc_meds:
+        groups = {}
+        for m in doc_meds:
+            key = (m.get('source_doc_type', 'document'), m.get('source_date', ''))
+            groups.setdefault(key, []).append(m)
+        for (src_type, src_date), meds in groups.items():
+            header = f"**From {src_type.replace('_', ' ')}"
+            if src_date:
+                header += f" dated {src_date}"
+            header += ":**"
+            lines.append(header)
+            for m in meds:
+                line = f"- {m['name']}"
+                if m.get('dose'):         line += f" {m['dose']}"
+                if m.get('frequency'):    line += f" — {m['frequency']}"
+                if m.get('duration'):     line += f", for {m['duration']}"
+                if m.get('instructions'): line += f" ({m['instructions']})"
+                lines.append(line)
+    if patient_meds and patient_meds.lower() not in ('none', 'nil', 'no', ''):
+        doc_names = " ".join(m.get('name', '').lower() for m in doc_meds)
+        reported = [tok.strip() for tok in re.split(r'[,;\n]', patient_meds) if tok.strip()]
+        new_terms = [tok for tok in reported if tok.lower() not in doc_names]
+        if new_terms:
+            # Label the source so the doctor can tell these apart from the
+            # OCR-extracted prescription meds above: these were typed by the patient
+            # at intake (self-reported, not read off an uploaded document).
+            lines.append("**Reported by patient (typed at intake):**")
+            for term in new_terms:
+                lines.append(f"- {term}")
+    elif not doc_meds:
+        lines.append("None")
+    return "\n".join(lines)
+
+
+def _render_allergies(session_json) -> str:
+    """## Allergies — the patient's own answer (authoritative), verbatim. Any
+    allergies OCR-extracted from uploaded documents are listed SEPARATELY and
+    clearly labelled 'from uploaded <doc> — AI-extracted, verify', never merged
+    into the patient-stated line (they are AI-derived and must be doctor-verified).
+    Document allergies already de-duplicate against the patient-stated text."""
+    answers = session_json.get("answers", {})
+    stated = _base_answer(answers, "allergies")
+    lines = ["## Allergies", stated if stated else "Not recorded"]
+
+    stated_lc = (stated or "").lower()
+    seen = set()
+    for a in session_json.get("allergies_from_documents", []):
+        allergen = str(a.get("allergen", "")).strip()
+        if not allergen:
+            continue
+        key = allergen.lower()
+        # Skip if the patient already stated it, or a duplicate across documents.
+        if key in seen or key in stated_lc:
+            continue
+        seen.add(key)
+        src = str(a.get("source_doc_type", "document")).replace("_", " ")
+        lines.append(f"- {allergen} (from uploaded {src} — AI-extracted, verify)")
+    return "\n".join(lines)
+
+
+def _render_vitals(vitals) -> str:
+    """## Vitals — each recorded vital, verbatim, one bullet per line."""
+    vitals = vitals or {}
+    b = []
+    bp_sys = vitals.get("bp_systolic")
+    if bp_sys:
+        b.append(f"- BP: {bp_sys}/{vitals.get('bp_diastolic', '?')} mmHg")
+    if vitals.get("weight_kg"):     b.append(f"- Weight: {vitals['weight_kg']} kg")
+    if vitals.get("spo2_pct"):      b.append(f"- SpO2: {vitals['spo2_pct']}%")
+    if vitals.get("heart_rate"):    b.append(f"- HR: {vitals['heart_rate']} bpm")
+    if vitals.get("temperature_c"): b.append(f"- Temp: {vitals['temperature_c']} °C")
+    return "## Vitals\n" + ("\n".join(b) if b else "- Not recorded")
+
+
+def _render_documents_reviewed(documents) -> str:
+    """## Documents Reviewed — one bullet per uploaded document (type + extracted
+    counts). Returns '' (section omitted) when nothing was uploaded."""
+    documents = documents or []
+    if not documents:
+        return ""
+    lines = ["## Documents Reviewed"]
+    for d in documents:
+        dtype = d.get('type', 'unknown').replace('_', ' ').title()
+        n_meds = len(d.get('medications', []))
+        n_labs = len(d.get('lab_values', []))
+        n_alg = len(d.get('allergies', []))
+        detail = []
+        if n_meds: detail.append(f"{n_meds} medications")
+        if n_labs: detail.append(f"{n_labs} lab values")
+        if n_alg: detail.append(f"{n_alg} allergies")
+        detail_str = f" — extracted {', '.join(detail)}" if detail else ""
+        lines.append(f"- **{dtype}**{detail_str}")
+    return "\n".join(lines)
+
+
+# ── Hybrid assembly ──────────────────────────────────────────────────────────
+_REPORT_FOOTER = (
+    "---\n*Generated by OPD Pre-Consultation AI. This is a data summary for "
+    "clinical use. The doctor should verify all information directly with the patient.*"
+)
+# The only headings the LLM is asked to write. Anything else it emits (a stray
+# pass-through section, a footer) is dropped so it can't duplicate our verbatim
+# sections.
+_LLM_HEADINGS = {
+    "quick summary",
+    "chief complaint & history",
+    "past medical history",
+    "lab results from documents",
+}
+
+
+def _split_llm_sections(md: str) -> dict:
+    """Split the LLM markdown into {normalized_heading: raw_section_text}, keeping
+    only the sections the LLM is supposed to own."""
+    sections = {}
+    key, buf = None, []
+    for line in (md or "").splitlines():
+        if line.lstrip().startswith("## "):
+            if key is not None:
+                sections[key] = "\n".join(buf).rstrip()
+            key = line.lstrip()[3:].strip().lower()
+            buf = [line.strip()]
+        elif key is not None:
+            buf.append(line)
+    if key is not None:
+        sections[key] = "\n".join(buf).rstrip()
+    # Keep only the LLM's own headings, and only when they actually have body
+    # content below the heading line — this drops empty sections the model
+    # sometimes emits (e.g. a bare "## Lab Results from Documents" with no table).
+    result = {}
+    for k, v in sections.items():
+        if k not in _LLM_HEADINGS:
+            continue
+        body = "\n".join(v.splitlines()[1:]).strip()
+        if body:
+            result[k] = v
+    return result
+
+
+def _assemble_report(llm_md, session_json) -> str:
+    """Weave the LLM's interpretive sections together with the Python-rendered
+    pass-through sections, in the canonical on-screen order."""
+    answers = session_json.get("answers", {})
+    llm = _split_llm_sections(llm_md)
+    parts = []
+    # Interpretive (LLM), in order, if present.
+    for k in ("quick summary", "chief complaint & history", "past medical history"):
+        if llm.get(k):
+            parts.append(llm[k])
+    # Verbatim pass-through (Python) — always present.
+    parts.append(_render_medications(session_json))
+    parts.append(_render_allergies(session_json))
+    parts.append(_render_vitals(session_json.get("vitals", {})))
+    # Lab results table (LLM) — ONLY when real OCR-extracted lab data exists.
+    # This is what removes the OCR-derived lab section when OCR is off (uploaded
+    # docs stay unconfirmed → no lab data reaches the report) or when nothing was
+    # uploaded, and it stops the model fabricating an empty/hallucinated table.
+    if session_json.get("lab_values_from_documents") and llm.get("lab results from documents"):
+        parts.append(llm["lab results from documents"])
+    # Documents reviewed (Python) — omitted when nothing uploaded.
+    docs = _render_documents_reviewed(session_json.get("documents", []))
+    if docs:
+        parts.append(docs)
+    return "\n\n".join(parts) + "\n\n" + _REPORT_FOOTER
 
 
 def _fallback_report(session_json):
@@ -344,59 +566,17 @@ def _fallback_report(session_json):
     if not any("🚨" in l or "⚠" in l for l in lines[1:]):
         lines.append("- Mild presentation, no critical flags")
 
-    lines.append(f"\n## Chief Complaint & History\n{answers.get('q_chief_complaint', 'Not recorded')}")
-    lines.append(f"\n## Vitals")
-    if vitals:
-        if bp_sys:
-            lines.append(f"- BP: {bp_sys}/{vitals.get('bp_diastolic', '?')} mmHg")
-        if vitals.get("weight_kg"):
-            lines.append(f"- Weight: {vitals['weight_kg']} kg")
-        if spo2:
-            lines.append(f"- SpO2: {spo2}%")
-        if vitals.get("heart_rate"):
-            lines.append(f"- HR: {vitals['heart_rate']} bpm")
-    else:
-        lines.append("- Not recorded")
+    cc = _base_answer(answers, "chief_complaint")
+    lines.append(f"\n## Chief Complaint & History\n{cc if cc else 'Not recorded'}")
 
-    # Medications: document-extracted (grouped by source), patient-reported only if it adds info
-    lines.append("\n## Current/Prior Medications")
-    doc_meds = session_json.get("medications_from_documents", [])
-    patient_meds = answers.get("q_medications", "")
-    if doc_meds:
-        # Group drugs by their source prescription so the date appears once per group
-        groups = {}
-        for m in doc_meds:
-            key = (m.get('source_doc_type', 'document'), m.get('source_date', ''))
-            groups.setdefault(key, []).append(m)
-        for (src_type, src_date), meds in groups.items():
-            header = f"**From {src_type.replace('_', ' ')}"
-            if src_date: header += f" dated {src_date}"
-            header += ":**"
-            lines.append(header)
-            for m in meds:
-                line = f"- {m['name']}"
-                if m.get('dose'): line += f" {m['dose']}"
-                if m.get('frequency'): line += f" — {m['frequency']}"
-                if m.get('duration'): line += f", for {m['duration']}"
-                if m.get('instructions'): line += f" ({m['instructions']})"
-                lines.append(line)
-    # Include any patient-reported meds not already covered by the documents,
-    # labelled so the doctor can tell them from the OCR-extracted prescription
-    # meds above (these were typed by the patient at intake, not read off a doc).
-    if patient_meds and patient_meds.lower() not in ('none', 'nil', 'no', ''):
-        doc_names = " ".join(m.get('name', '').lower() for m in doc_meds)
-        reported = [t.strip() for t in re.split(r'[,;\n]', patient_meds) if t.strip()]
-        new_terms = [t for t in reported if t.lower() not in doc_names]
-        if new_terms:
-            lines.append("**Reported by patient (typed at intake):**")
-            for term in new_terms:
-                lines.append(f"- {term}")
-    elif not doc_meds:
-        lines.append("None")
+    # Deterministic pass-through sections — SAME renderers the LLM/hybrid path uses,
+    # in the same canonical order (Medications → Allergies → Vitals), so a no-LLM
+    # report is identical to a hybrid one for these sections.
+    lines.append("\n" + _render_medications(session_json))
+    lines.append("\n" + _render_allergies(session_json))
+    lines.append("\n" + _render_vitals(vitals))
 
-    lines.append(f"\n## Allergies\n{answers.get('q_allergies', 'Not recorded')}")
-
-    # Lab values from documents
+    # Lab values from documents (simple table; no LLM in the fallback path)
     doc_labs = session_json.get("lab_values_from_documents", [])
     if doc_labs:
         lines.append("\n## Lab Results from Documents")
@@ -405,19 +585,9 @@ def _fallback_report(session_json):
         for l in doc_labs:
             lines.append(f"| {l['test']} | {l['value']} | {l.get('source_doc_type', '')} {l.get('source_date', '')} |")
 
-    # Documents reviewed
-    documents = session_json.get("documents", [])
-    if documents:
-        lines.append("\n## Documents Reviewed")
-        for d in documents:
-            dtype = d.get('type', 'unknown').replace('_', ' ').title()
-            n_meds = len(d.get('medications', []))
-            n_labs = len(d.get('lab_values', []))
-            detail = []
-            if n_meds: detail.append(f"{n_meds} medications")
-            if n_labs: detail.append(f"{n_labs} lab values")
-            detail_str = f" — extracted {', '.join(detail)}" if detail else ""
-            lines.append(f"- **{dtype}**{detail_str}")
+    docs_section = _render_documents_reviewed(session_json.get("documents", []))
+    if docs_section:
+        lines.append("\n" + docs_section)
 
     lines.append("\n---")
     lines.append("*Generated by OPD Pre-Consultation AI. The doctor should verify all information.*")

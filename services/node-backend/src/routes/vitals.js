@@ -1,7 +1,6 @@
 const { Router } = require('express');
 const pool = require('../models/db');
-const { authMiddleware } = require('../middleware/auth');
-const { requireSessionAccess } = require('../middleware/ownership');
+const { authMiddleware, requireSessionOwnership } = require('../middleware/auth');
 
 const router = Router();
 
@@ -28,12 +27,25 @@ function validateVitals(body) {
     if (!Number.isFinite(n)) return `${key} must be a number`;
     if (n < min || n > max) return `${key} must be between ${min} and ${max}`;
   }
+
+  // Cross-field: systolic must exceed diastolic. The per-field ranges above are
+  // deliberately wide, so each half of a transposed reading passes on its own —
+  // only comparing them catches it. This matters clinically: 120/80 entered as
+  // 80/120 gives a systolic of 80, which trips the "< 90 → shock" rule in
+  // triage.py and marks a well patient RED. Only enforced when both are present.
+  const sys = Number(body.bp_systolic);
+  const dia = Number(body.bp_diastolic);
+  const hasSys = body.bp_systolic !== undefined && body.bp_systolic !== null && body.bp_systolic !== '';
+  const hasDia = body.bp_diastolic !== undefined && body.bp_diastolic !== null && body.bp_diastolic !== '';
+  if (hasSys && hasDia && Number.isFinite(sys) && Number.isFinite(dia) && dia >= sys) {
+    return 'bp_systolic must be greater than bp_diastolic';
+  }
   return null;
 }
 
-// Submit vitals. The :session_id is authorized against the caller's token — a
-// patient may only write their own; a nurse/doctor may write any (late vitals).
-router.post('/:session_id', authMiddleware, requireSessionAccess(), async (req, res) => {
+// Submit vitals — a patient submits their own; clinicians may enter for any
+// session (§5c ownership; role bypass for doctor/admin).
+router.post('/:session_id', authMiddleware, requireSessionOwnership('session_id'), async (req, res) => {
   try {
     const { session_id } = req.params;
     const { bp_systolic, bp_diastolic, bp_side, weight_kg, spo2_pct, heart_rate, temperature_c, source } = req.body;
@@ -63,8 +75,8 @@ router.post('/:session_id', authMiddleware, requireSessionAccess(), async (req, 
   }
 });
 
-// Get vitals for session
-router.get('/:session_id', authMiddleware, requireSessionAccess(), async (req, res) => {
+// Get vitals for session — own session (patient) or any (clinician).
+router.get('/:session_id', authMiddleware, requireSessionOwnership('session_id'), async (req, res) => {
   try {
     const result = await pool.query(
       'SELECT * FROM session_vitals WHERE session_id = $1 ORDER BY recorded_at DESC LIMIT 1',

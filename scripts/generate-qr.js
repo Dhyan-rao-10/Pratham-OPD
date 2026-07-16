@@ -6,7 +6,7 @@
 // per-department at registration. For a printable poster use scripts/qr-poster.html.
 // Usage: node generate-qr.js [baseUrl]
 //   e.g. node generate-qr.js https://opd.hospital.gov.in
-const hospitalId = process.env.HOSPITAL_ID || 'hospital_01';
+const hospitalId = process.env.DEMO_HOSPITAL_ID || 'demo_hospital_01';
 const base = (process.argv[2] || 'http://localhost').replace(/\/+$/, '');
 const url = `${base}/?h=${encodeURIComponent(hospitalId)}`;
 

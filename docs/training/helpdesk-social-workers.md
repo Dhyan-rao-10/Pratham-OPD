@@ -21,10 +21,8 @@ No app to install. Works in **English / हिंदी / తెలుగు** (
    Tell them to hold the paper flat, good light, whole page in frame.
 7. **Questions** — a few symptom questions ("Question 3/7" shows progress). They can
    **type, tap, or speak** the answer (mic button). Assisted mode reads questions aloud.
-8. **Review & submit** — a short confirmation screen; they tap **Submit** to finish.
-   (Vitals like BP/weight/SpO₂ are **not** entered by the patient here — a nurse/staff member
-   records them separately for departments that collect them.)
-9. **Done** — a **token number** appears (e.g. `OPD-007`). Tell them to **watch the
+8. **Vitals** *(if the department collects them)* — staff/nurse can enter BP, weight, SpO₂.
+9. **Done** — a **token number** appears (e.g. `CARD-007`). Tell them to **watch the
    waiting-room screen** for their token and keep the phone page open.
 
 ## Who needs your help

@@ -1,0 +1,229 @@
+[
+  {
+    "id": "q_chest_pain",
+    "department": "CARD",
+    "text_en": "Do you have chest pain or tightness?",
+    "text_hi": "क्या आपको सीने में दर्द या जकड़न है?",
+    "text_te": "మీకు ఛాతీ నొప్పి లేదా బిగుతు ఉందా?",
+    "q_type": "BOOLEAN",
+    "options_json": null,
+    "required": true,
+    "triage_flag": "RED",
+    "triage_answer": "yes",
+    "next_default": null,
+    "next_rules": [
+      {
+        "if_answer": "yes",
+        "go_to": "q_chest_pain_radiation"
+      },
+      {
+        "if_answer": "no",
+        "go_to": "q_breathlessness"
+      }
+    ],
+    "sort_order": 10
+  },
+  {
+    "id": "q_chest_pain_radiation",
+    "department": "CARD",
+    "text_en": "Does the pain spread to your arm, jaw, or shoulder?",
+    "text_hi": "क्या दर्द आपके हाथ, जबड़े या कंधे तक फैलता है?",
+    "text_te": "నొప్పి మీ చేతి, దవడ లేదా భుజానికి వ్యాపిస్తుందా?",
+    "q_type": "BOOLEAN",
+    "options_json": null,
+    "required": true,
+    "triage_flag": "RED",
+    "triage_answer": "yes",
+    "next_default": "q_breathlessness",
+    "next_rules": null,
+    "sort_order": 11
+  },
+  {
+    "id": "q_breathlessness",
+    "department": "CARD",
+    "text_en": "Do you experience breathlessness?",
+    "text_hi": "क्या आपको सांस लेने में तकलीफ होती है?",
+    "text_te": "మీకు ఊపిరి ఆడకపోవడం అనుభవమవుతుందా?",
+    "q_type": "SINGLE_SELECT",
+    "options_json": [
+      {
+        "value": "none",
+        "label_en": "None",
+        "label_hi": "नहीं",
+        "label_te": "లేదు"
+      },
+      {
+        "value": "on_exertion",
+        "label_en": "On exertion",
+        "label_hi": "मेहनत करने पर",
+        "label_te": "శ్రమ చేసినప్పుడు"
+      },
+      {
+        "value": "at_rest",
+        "label_en": "At rest",
+        "label_hi": "आराम करते समय",
+        "label_te": "విశ్రాంతిలో"
+      },
+      {
+        "value": "lying_flat",
+        "label_en": "Lying flat",
+        "label_hi": "लेटने पर",
+        "label_te": "పడుకున్నప్పుడు"
+      }
+    ],
+    "required": true,
+    "triage_flag": "AMBER",
+    "triage_answer": "at_rest",
+    "next_default": "q_palpitations",
+    "next_rules": null,
+    "sort_order": 12
+  },
+  {
+    "id": "q_palpitations",
+    "department": "CARD",
+    "text_en": "Do you have irregular heartbeat or palpitations?",
+    "text_hi": "क्या आपकी धड़कन अनियमित है या तेज़ धड़कन होती है?",
+    "text_te": "మీకు అసమాన గుండె కొట్టుకోవడం లేదా గుండె దడ ఉందా?",
+    "q_type": "BOOLEAN",
+    "options_json": null,
+    "required": true,
+    "triage_flag": null,
+    "triage_answer": null,
+    "next_default": "q_swelling",
+    "next_rules": null,
+    "sort_order": 13
+  },
+  {
+    "id": "q_swelling",
+    "department": "CARD",
+    "text_en": "Do you have swelling in your feet or ankles?",
+    "text_hi": "क्या आपके पैरों या टखनों में सूजन है?",
+    "text_te": "మీ పాదాలు లేదా చీలమండలాలలో వాపు ఉందా?",
+    "q_type": "BOOLEAN",
+    "options_json": null,
+    "required": true,
+    "triage_flag": null,
+    "triage_answer": null,
+    "next_default": "q_syncope",
+    "next_rules": null,
+    "sort_order": 14
+  },
+  {
+    "id": "q_syncope",
+    "department": "CARD",
+    "text_en": "Have you fainted or felt like you would faint?",
+    "text_hi": "क्या आप बेहोश हुए हैं या बेहोश होने जैसा लगा है?",
+    "text_te": "మీరు స్పృహ కోల్పోయారా లేదా స్పృహ కోల్పోతున్నట్లు అనిపించిందా?",
+    "q_type": "BOOLEAN",
+    "options_json": null,
+    "required": true,
+    "triage_flag": "AMBER",
+    "triage_answer": "yes",
+    "next_default": "q_surgery_history",
+    "next_rules": null,
+    "sort_order": 15
+  },
+  {
+    "id": "q_surgery_history",
+    "department": "CARD",
+    "text_en": "Have you had any heart surgery or procedure?",
+    "text_hi": "क्या आपकी कोई हृदय शल्य चिकित्सा या प्रक्रिया हुई है?",
+    "text_te": "మీకు ఏదైనా గుండె శస్త్రచికిత్స లేదా ప్రక్రియ జరిగిందా?",
+    "q_type": "BOOLEAN",
+    "options_json": null,
+    "required": true,
+    "triage_flag": null,
+    "triage_answer": null,
+    "next_default": null,
+    "next_rules": [
+      {
+        "if_answer": "yes",
+        "go_to": "q_surgery_detail"
+      },
+      {
+        "if_answer": "no",
+        "go_to": "q_diabetes"
+      }
+    ],
+    "sort_order": 16
+  },
+  {
+    "id": "q_surgery_detail",
+    "department": "CARD",
+    "text_en": "What surgery and when? (e.g., bypass 2021, valve repair 2023)",
+    "text_hi": "कौन सी सर्जरी और कब? (जैसे, बाइपास 2021, वाल्व रिपेयर 2023)",
+    "text_te": "ఏ శస్త్రచికిత్స మరియు ఎప్పుడు? (ఉదా., బైపాస్ 2021, వాల్వ్ రిపేర్ 2023)",
+    "q_type": "FREE_TEXT",
+    "options_json": null,
+    "required": true,
+    "triage_flag": null,
+    "triage_answer": null,
+    "next_default": "q_diabetes",
+    "next_rules": null,
+    "sort_order": 17
+  },
+  {
+    "id": "q_diabetes",
+    "department": "CARD",
+    "text_en": "Do you have diabetes?",
+    "text_hi": "क्या आपको मधुमेह (शुगर) है?",
+    "text_te": "మీకు మధుమేహం (షుగర్) ఉందా?",
+    "q_type": "BOOLEAN",
+    "options_json": null,
+    "required": true,
+    "triage_flag": null,
+    "triage_answer": null,
+    "next_default": "q_hypertension",
+    "next_rules": null,
+    "sort_order": 18
+  },
+  {
+    "id": "q_hypertension",
+    "department": "CARD",
+    "text_en": "Do you have high blood pressure (hypertension)?",
+    "text_hi": "क्या आपको उच्च रक्तचाप (हाइपरटेंशन) है?",
+    "text_te": "మీకు అధిక రక్తపోటు (హైపర్‌టెన్షన్) ఉందా?",
+    "q_type": "BOOLEAN",
+    "options_json": null,
+    "required": true,
+    "triage_flag": null,
+    "triage_answer": null,
+    "next_default": "q_smoking",
+    "next_rules": null,
+    "sort_order": 19
+  },
+  {
+    "id": "q_smoking",
+    "department": "CARD",
+    "text_en": "Do you smoke?",
+    "text_hi": "क्या आप धूम्रपान करते हैं?",
+    "text_te": "మీరు పొగ తాగుతారా?",
+    "q_type": "SINGLE_SELECT",
+    "options_json": [
+      {
+        "value": "never",
+        "label_en": "Never",
+        "label_hi": "कभी नहीं",
+        "label_te": "ఎప్పుడూ లేదు"
+      },
+      {
+        "value": "ex_smoker",
+        "label_en": "Ex-smoker",
+        "label_hi": "पहले करता था",
+        "label_te": "గతంలో చేసేవాడు"
+      },
+      {
+        "value": "current",
+        "label_en": "Current smoker",
+        "label_hi": "वर्तमान में",
+        "label_te": "ప్రస్తుతం చేస్తున్నారు"
+      }
+    ],
+    "required": true,
+    "triage_flag": null,
+    "triage_answer": null,
+    "next_default": null,
+    "next_rules": null,
+    "sort_order": 20
+  }
+]

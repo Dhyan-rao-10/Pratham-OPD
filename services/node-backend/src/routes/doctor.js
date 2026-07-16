@@ -1,18 +1,36 @@
 const { Router } = require('express');
 const pool = require('../models/db');
 const { signToken, authMiddleware, requireRole } = require('../middleware/auth');
-const { isLocked, recordFailure, clearFailures } = require('../utils/loginLimiter');
+const { isLocked, recordFailure, clearFailures, MAX_ATTEMPTS } = require('../utils/loginLimiter');
 const { hashPin, verifyPin } = require('../utils/pinHash');
+const { normalizeIndianPhone } = require('../utils/phone');
 
 const router = Router();
 
-// Every route below that acts as a doctor.
-// (PIN hashing lives in utils/pinHash.js — bcrypt with legacy SHA-256 fallback.) Previously each handler re-implemented
-// this by hand (read the header, verifyToken, check role) — and three routes
-// forgot to, leaving them fully open. One shared gate, applied declaratively.
+// Validate + canonicalise a doctor's phone. Returns the 10-digit NATIONAL form, or
+// null if it isn't a valid Indian mobile.
+//
+// Deliberately NOT the e164 form that sessions store: doctors are matched on the
+// bare 10 digits (`WHERE phone = $1` in /login, and the 005 seed inserts
+// '9876500001'). Storing '+91…' here would make every doctor unable to log in.
+// Accepting the util's other formats (+91…, 0…, spaces) and storing the national
+// form means an admin can paste any of them and login still matches.
+function normalizeDoctorPhone(raw) {
+  const { national, valid } = normalizeIndianPhone(raw);
+  return valid ? national : null;
+}
+
+const IS_PROD = process.env.NODE_ENV === 'production';
+// The seeded demo PIN (§8b). Stored hashes are bcrypt — salted, so there is no
+// fixed digest to compare against; detecting this PIN requires the plaintext.
+// It is a published default, not a secret (see README seed doctors).
+const DEMO_PIN = '1234';
+
+// Every PHI route below goes through authMiddleware + requireRole rather than an
+// inline token check, so a missing gate is visible at the route definition
+// (§5a — `all-sessions` and `reassign` previously had no check at all).
 const doctorOnly = [authMiddleware, requireRole('doctor')];
-// Clinical staff: the HIS admin dashboard and the doctor console both reach these.
-const clinicalOnly = [authMiddleware, requireRole('doctor', 'admin')];
+const clinicianOnly = [authMiddleware, requireRole('doctor', 'admin')];
 
 // Doctor PIN login
 router.post('/login', async (req, res) => {
@@ -20,13 +38,11 @@ router.post('/login', async (req, res) => {
     const { phone, pin } = req.body;
     if (!phone || !pin) return res.status(400).json({ error: 'Phone and PIN required' });
 
-    // Brute-force lockout: reject early once this phone has failed too many times
-    // inside the window (a 4-digit PIN is otherwise trivially guessable).
+    // §8b — lockout: reject early once this phone has failed too many times.
     const lock = await isLocked('doctor', String(phone));
     if (lock.locked) {
       return res.status(429).json({
         error: `Too many failed attempts. Try again in ${Math.ceil(lock.retryAfter / 60)} min.`,
-        retry_after: lock.retryAfter,
       });
     }
 
@@ -40,23 +56,31 @@ router.post('/login', async (req, res) => {
     }
 
     const doctor = result.rows[0];
+
+    // §8b — verify against the stored hash. verifyPin handles both bcrypt and
+    // the legacy unsalted SHA-256; a legacy hash that matches sets needsRehash,
+    // and we upgrade it in place so the weak hash is never used again.
     const { ok, needsRehash } = await verifyPin(pin, doctor.pin_hash);
+
     if (!ok) {
       await recordFailure('doctor', String(phone));
       return res.status(401).json({ error: 'Invalid PIN' });
     }
 
-    // Lazy migration: a legacy SHA-256 PIN just verified — upgrade it to bcrypt
-    // so the plaintext-recoverable hash is replaced. Best-effort; never blocks login.
     if (needsRehash) {
       try {
         await pool.query('UPDATE doctors SET pin_hash = $1 WHERE id = $2', [await hashPin(pin), doctor.id]);
-      } catch (e) {
-        console.error('pin rehash failed (non-fatal):', e.message);
-      }
+      } catch { /* non-fatal — login still succeeds, migrates next time */ }
     }
 
-    // Successful login — reset the failure counter for this phone.
+    // §8b — in production, refuse to admit a doctor still on the demo PIN even if
+    // the row survived the startup guard (fail closed, like JWT_SECRET). Compare
+    // the plaintext we just verified: the stored bcrypt hash is salted, so there
+    // is nothing to match it against directly.
+    if (IS_PROD && String(pin) === DEMO_PIN) {
+      return res.status(403).json({ error: 'This account uses the default demo PIN. Ask an admin to reset it.' });
+    }
+
     await clearFailures('doctor', String(phone));
 
     const token = signToken({
@@ -88,15 +112,26 @@ router.post('/', authMiddleware, requireRole('admin'), async (req, res) => {
     if (!name || !department || !phone || !pin) {
       return res.status(400).json({ error: 'name, department, phone, pin are required' });
     }
-    if (!/^\d{4,6}$/.test(String(pin))) {
+    if (pin.length < 4 || pin.length > 6 || !/^\d+$/.test(pin)) {
       return res.status(400).json({ error: 'PIN must be 4-6 digits' });
     }
+    if (IS_PROD && pin === '1234') {
+      return res.status(400).json({ error: 'Refusing to set the well-known demo PIN (1234) in production.' });
+    }
+    // A doctor whose phone isn't a real 10-digit mobile can never log in (login
+    // matches on it), so reject it here rather than create an unusable account.
+    const doctorPhone = normalizeDoctorPhone(phone);
+    if (!doctorPhone) {
+      return res.status(400).json({ error: 'Invalid phone number — must be a 10-digit Indian mobile' });
+    }
 
+    // §8b — new PINs are stored as bcrypt in pin_hash. There is no reversible
+    // SHA-256 hash on disk for new doctors.
     const result = await pool.query(
       `INSERT INTO doctors (name, department, phone, pin_hash, registration_no)
        VALUES ($1, $2, $3, $4, $5)
        RETURNING id, name, department, phone, registration_no, is_active, created_at`,
-      [name, department.toUpperCase(), phone, await hashPin(pin), registration_no || null]
+      [name, department.toUpperCase(), doctorPhone, await hashPin(pin), registration_no || null]
     );
 
     res.json(result.rows[0]);
@@ -131,12 +166,19 @@ router.patch('/:id', authMiddleware, requireRole('admin'), async (req, res) => {
     }
     if (phone !== undefined) {
       if (!String(phone).trim()) return res.status(400).json({ error: 'phone cannot be empty' });
-      params.push(String(phone).trim()); sets.push(`phone = $${params.length}`);
+      const p = normalizeDoctorPhone(phone);
+      if (!p) return res.status(400).json({ error: 'Invalid phone number — must be a 10-digit Indian mobile' });
+      params.push(p); sets.push(`phone = $${params.length}`);
     }
     if (pin !== undefined && pin !== '') {
-      if (!/^\d{4,6}$/.test(String(pin))) {
+      if (pin.length < 4 || pin.length > 6 || !/^\d+$/.test(pin)) {
         return res.status(400).json({ error: 'PIN must be 4-6 digits' });
       }
+      if (IS_PROD && pin === '1234') {
+        return res.status(400).json({ error: 'Refusing to set the well-known demo PIN (1234) in production.' });
+      }
+      // §8b — reset overwrites pin_hash with bcrypt, so the account is no longer
+      // flagged as demo-PIN and has no reversible hash left on disk.
       params.push(await hashPin(pin)); sets.push(`pin_hash = $${params.length}`);
     }
 
@@ -187,22 +229,23 @@ router.post('/:id/reactivate', authMiddleware, requireRole('admin'), async (req,
   }
 });
 
-// List doctors. Any authenticated caller — the patient registration page offers a
-// "preferred doctor" chooser. A doctor's PHONE NUMBER is staff contact data, not
-// something a patient kiosk needs, so it is only returned to admins (the HIS
-// doctor-management screen is the only reader).
+// List doctors. The patient registration page reads this to offer a preferred
+// doctor, so it takes any valid token — but a patient must not learn a doctor's
+// personal phone or registration number, so those are stripped for patient
+// tokens. Clinicians (HIS doctor management) get the full row.
 router.get('/', authMiddleware, async (req, res) => {
   try {
     const { department } = req.query;
-    const isAdmin = req.session_data.role === 'admin';
-    const cols = isAdmin
-      ? 'id, name, department, phone, registration_no, is_active, created_at'
-      : 'id, name, department, registration_no, is_active, created_at';
-    let q = `SELECT ${cols} FROM doctors WHERE 1=1`;
+    let q = 'SELECT id, name, department, phone, registration_no, is_active, created_at FROM doctors WHERE 1=1';
     const params = [];
     if (department) { params.push(department); q += ` AND department = $${params.length}`; }
     q += ' ORDER BY name';
     const result = await pool.query(q, params);
+
+    const role = req.session_data && req.session_data.role;
+    if (role !== 'doctor' && role !== 'admin') {
+      return res.json(result.rows.map(({ phone, registration_no, ...safe }) => safe));
+    }
     res.json(result.rows);
   } catch (err) {
     res.status(500).json({ error: 'Internal server error' });
@@ -263,18 +306,17 @@ router.get('/queue', ...doctorOnly, async (req, res) => {
   }
 });
 
-// Assign session to doctor (self-assign)
+// Assign session to doctor (self-assign or by admin)
 router.post('/assign/:session_id', ...doctorOnly, async (req, res) => {
   try {
     const decoded = req.session_data;
 
+    // Ownership: a doctor may only self-assign a patient who is FREE or already
+    // theirs — never steal one another doctor is consulting/holds. Moving a patient
+    // BETWEEN doctors is an admin action (POST /reassign, role-gated). Mirrors the
+    // atomic guard on /open.
     // consulted_at is stamped ONCE (first open) and never overwritten, so the
     // Consulted list keeps a fixed order even when a patient is re-opened.
-    //
-    // The WHERE clause mirrors /open: acquire only if the visit is free or already
-    // mine, and not yet dispatched. Without it this route was an unconditional
-    // UPDATE — a second doctor could take a patient another doctor had locked,
-    // silently defeating the mutual exclusion /open implements.
     const result = await pool.query(
       `UPDATE sessions SET assigned_doctor_id = $1, updated_at = NOW(),
               consulted_at = COALESCE(consulted_at, NOW())
@@ -284,7 +326,22 @@ router.post('/assign/:session_id', ...doctorOnly, async (req, res) => {
        RETURNING *`,
       [decoded.doctor_id, req.params.session_id]
     );
-    if (!result.rows.length) return await explainLockFailure(req, res);
+    if (!result.rows.length) {
+      // Couldn't acquire — say why (held by another, already done, or gone).
+      const cur = await pool.query(
+        `SELECT s.assigned_doctor_id, s.dispatched_at, d.name AS doctor_name
+           FROM sessions s LEFT JOIN doctors d ON s.assigned_doctor_id = d.id
+          WHERE s.id = $1`,
+        [req.params.session_id]
+      );
+      if (!cur.rows.length) return res.status(404).json({ error: 'Session not found' });
+      const row = cur.rows[0];
+      return res.status(409).json({
+        error: row.dispatched_at ? 'dispatched' : 'locked',
+        locked_by: row.doctor_name || 'another doctor',
+        dispatched: !!row.dispatched_at,
+      });
+    }
 
     await pool.query(
       `INSERT INTO audit_log (session_id, event_type, actor, payload) VALUES ($1, 'doctor_assigned', $2, $3)`,
@@ -297,24 +354,6 @@ router.post('/assign/:session_id', ...doctorOnly, async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
-
-// A guarded lock UPDATE matched no row. Distinguish "no such session" (404) from
-// "held by another doctor / already dispatched" (409) so the UI can say which.
-async function explainLockFailure(req, res) {
-  const cur = await pool.query(
-    `SELECT s.dispatched_at, d.name AS doctor_name
-       FROM sessions s LEFT JOIN doctors d ON s.assigned_doctor_id = d.id
-      WHERE s.id = $1`,
-    [req.params.session_id]
-  );
-  if (!cur.rows.length) return res.status(404).json({ error: 'Session not found' });
-  const row = cur.rows[0];
-  return res.status(409).json({
-    error: 'locked',
-    locked_by: row.doctor_name || 'another doctor',
-    dispatched: !!row.dispatched_at,
-  });
-}
 
 // OPEN (lock) a patient's visit for consultation. Atomic: succeeds only if the
 // visit is free or already mine and not yet dispatched. If another doctor holds
@@ -387,8 +426,8 @@ router.post('/dispatch/:session_id', ...doctorOnly, async (req, res) => {
   try {
     const decoded = req.session_data;
 
-    // Only the doctor holding the visit (or nobody) may finish it — a doctor must
-    // not be able to close out a consultation another doctor is running.
+    // Ownership: only the doctor holding the visit (or nobody) may finish it — a
+    // doctor must not finalize another doctor's active consultation.
     const result = await pool.query(
       `UPDATE sessions
           SET dispatched_at = NOW(),
@@ -400,7 +439,15 @@ router.post('/dispatch/:session_id', ...doctorOnly, async (req, res) => {
         RETURNING *`,
       [decoded.doctor_id, req.params.session_id]
     );
-    if (!result.rows.length) return await explainLockFailure(req, res);
+    if (!result.rows.length) {
+      const cur = await pool.query(
+        `SELECT s.assigned_doctor_id, d.name AS doctor_name
+           FROM sessions s LEFT JOIN doctors d ON s.assigned_doctor_id = d.id WHERE s.id = $1`,
+        [req.params.session_id]
+      );
+      if (!cur.rows.length) return res.status(404).json({ error: 'Session not found' });
+      return res.status(409).json({ error: 'locked', locked_by: cur.rows[0].doctor_name || 'another doctor' });
+    }
 
     await pool.query(
       `INSERT INTO audit_log (session_id, event_type, actor, payload) VALUES ($1, 'doctor_dispatched', $2, $3)`,
@@ -419,15 +466,23 @@ router.post('/unassign/:session_id', ...doctorOnly, async (req, res) => {
     const decoded = req.session_data;
 
     // Abandon a lock — release the patient back to "waiting" (clear the doctor
-    // link AND the consulted stamp so it's open for anyone again). Only the
-    // holding doctor may abandon; you cannot drop someone else's lock.
+    // link AND the consulted stamp so it's open for anyone again). Ownership: only
+    // the doctor holding it (or a free session) — don't yank another doctor's lock;
+    // admins move patients via /reassign.
     const result = await pool.query(
       `UPDATE sessions SET assigned_doctor_id = NULL, consulted_at = NULL, updated_at = NOW()
-        WHERE id = $1 AND (assigned_doctor_id IS NULL OR assigned_doctor_id = $2)
-        RETURNING *`,
+        WHERE id = $1 AND (assigned_doctor_id IS NULL OR assigned_doctor_id = $2) RETURNING *`,
       [req.params.session_id, decoded.doctor_id]
     );
-    if (!result.rows.length) return await explainLockFailure(req, res);
+    if (!result.rows.length) {
+      const cur = await pool.query(
+        `SELECT s.assigned_doctor_id, d.name AS doctor_name
+           FROM sessions s LEFT JOIN doctors d ON s.assigned_doctor_id = d.id WHERE s.id = $1`,
+        [req.params.session_id]
+      );
+      if (!cur.rows.length) return res.status(404).json({ error: 'Session not found' });
+      return res.status(409).json({ error: 'locked', locked_by: cur.rows[0].doctor_name || 'another doctor' });
+    }
 
     await pool.query(
       `INSERT INTO audit_log (session_id, event_type, actor, payload) VALUES ($1, 'doctor_unassigned', $2, $3)`,
@@ -450,16 +505,25 @@ router.post('/release/:session_id', ...doctorOnly, async (req, res) => {
   try {
     const decoded = req.session_data;
 
-    // Only the doctor who holds (or consulted) the visit may release it back.
+    // Ownership: only the doctor who consulted this visit may release it back to
+    // the queue (it sits in THEIR Consulted list). Not free-or-mine — a release
+    // acts on a visit that is, by definition, assigned to the releasing doctor.
     const result = await pool.query(
       `UPDATE sessions
           SET assigned_doctor_id = NULL, consulted_at = NULL, dispatched_at = NULL,
               released_at = NOW(), updated_at = NOW()
-        WHERE id = $1 AND (assigned_doctor_id IS NULL OR assigned_doctor_id = $2)
-        RETURNING *`,
+        WHERE id = $1 AND assigned_doctor_id = $2 RETURNING *`,
       [req.params.session_id, decoded.doctor_id]
     );
-    if (!result.rows.length) return await explainLockFailure(req, res);
+    if (!result.rows.length) {
+      const cur = await pool.query(
+        `SELECT s.assigned_doctor_id, d.name AS doctor_name
+           FROM sessions s LEFT JOIN doctors d ON s.assigned_doctor_id = d.id WHERE s.id = $1`,
+        [req.params.session_id]
+      );
+      if (!cur.rows.length) return res.status(404).json({ error: 'Session not found' });
+      return res.status(409).json({ error: 'not_yours', locked_by: cur.rows[0].doctor_name || 'another doctor' });
+    }
 
     await pool.query(
       `INSERT INTO audit_log (session_id, event_type, actor, payload) VALUES ($1, 'doctor_released', $2, $3)`,
@@ -481,9 +545,7 @@ router.post('/release/:session_id', ...doctorOnly, async (req, res) => {
 //   {}  / null            → unassign (back to the current department's general pool).
 // In every assign/move case we clear the handoff stamps (consulted_at, dispatched_at)
 // so the receiving doctor sees a fresh entry. Triage is preserved.
-// Reached by BOTH the HIS admin dashboard and the doctor console (handoff), so
-// this is clinical-staff, not doctor-only. It previously had no auth check at all.
-router.post('/reassign/:session_id', ...clinicalOnly, async (req, res) => {
+router.post('/reassign/:session_id', ...clinicianOnly, async (req, res) => {
   try {
     const { target_doctor_id, department } = req.body;
 
@@ -606,8 +668,9 @@ router.get('/consulted', ...doctorOnly, async (req, res) => {
   }
 });
 
-// All sessions with doctor info — for HIS/admin dashboard. Bulk PHI: staff only.
-router.get('/all-sessions', ...clinicalOnly, async (req, res) => {
+// All sessions with doctor info — for HIS/admin dashboard. Dumps the whole
+// patient roster, so it is clinician-only (§5a: this had no auth at all).
+router.get('/all-sessions', ...clinicianOnly, async (req, res) => {
   try {
     const { department, doctor_id, state, triage } = req.query;
     // display_state — the SINGLE source of truth for the HIS "State" column AND
@@ -681,16 +744,16 @@ router.post('/change-pin', ...doctorOnly, async (req, res) => {
 
     const { old_pin, new_pin } = req.body;
     if (!old_pin || !new_pin) return res.status(400).json({ error: 'old_pin and new_pin required' });
-    // Coerce before measuring: a JSON number ({"new_pin": 1234}) has no .length,
-    // so the bounds check silently passed and hashPin() then threw a 500.
-    if (!/^\d{4,6}$/.test(String(new_pin))) return res.status(400).json({ error: 'PIN must be 4-6 digits' });
+    if (new_pin.length < 4 || new_pin.length > 6 || !/^\d+$/.test(new_pin)) return res.status(400).json({ error: 'PIN must be 4-6 digits' });
+    if (IS_PROD && new_pin === '1234') return res.status(400).json({ error: 'Refusing to set the well-known demo PIN (1234) in production.' });
 
     const doc = await pool.query('SELECT pin_hash FROM doctors WHERE id = $1', [decoded.doctor_id]);
-    const okOld = doc.rows.length ? (await verifyPin(old_pin, doc.rows[0].pin_hash)).ok : false;
-    if (!okOld) {
-      return res.status(401).json({ error: 'Invalid current PIN' });
-    }
+    if (!doc.rows.length) return res.status(401).json({ error: 'Invalid current PIN' });
+    // §8b — verifyPin handles both bcrypt and the legacy SHA-256.
+    const okOld = (await verifyPin(old_pin, doc.rows[0].pin_hash)).ok;
+    if (!okOld) return res.status(401).json({ error: 'Invalid current PIN' });
 
+    // Store the new PIN as bcrypt, overwriting whatever was there.
     await pool.query('UPDATE doctors SET pin_hash = $1 WHERE id = $2', [await hashPin(new_pin), decoded.doctor_id]);
     res.json({ updated: true });
   } catch (err) {

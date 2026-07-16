@@ -1,0 +1,32 @@
+[
+  {
+    "id": "q_gen_duration",
+    "department": "GEN",
+    "text_en": "How long have you had this problem?",
+    "text_hi": "यह समस्या कब से है?",
+    "text_te": "ఈ సమస్య ఎంత కాలంగా ఉంది?",
+    "q_type": "FREE_TEXT",
+    "options_json": null,
+    "required": true,
+    "triage_flag": null,
+    "triage_answer": null,
+    "next_default": "q_gen_fever",
+    "next_rules": null,
+    "sort_order": 10
+  },
+  {
+    "id": "q_gen_fever",
+    "department": "GEN",
+    "text_en": "Do you have fever?",
+    "text_hi": "क्या आपको बुखार है?",
+    "text_te": "మీకు జ్వరం ఉందా?",
+    "q_type": "BOOLEAN",
+    "options_json": null,
+    "required": true,
+    "triage_flag": null,
+    "triage_answer": null,
+    "next_default": null,
+    "next_rules": null,
+    "sort_order": 11
+  }
+]

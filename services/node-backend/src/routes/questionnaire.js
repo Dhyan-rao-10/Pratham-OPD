@@ -1,7 +1,6 @@
 const { Router } = require('express');
 const pool = require('../models/db');
-const { authMiddleware } = require('../middleware/auth');
-const { requireSessionAccess } = require('../middleware/ownership');
+const { authMiddleware, requireSessionOwnership } = require('../middleware/auth');
 
 const router = Router();
 
@@ -86,7 +85,7 @@ async function walkDag(session_id, department) {
 }
 
 // Get next question for a session
-router.get('/next/:session_id', authMiddleware, requireSessionAccess(), async (req, res) => {
+router.get('/next/:session_id', authMiddleware, requireSessionOwnership('session_id'), async (req, res) => {
   try {
     const { session_id } = req.params;
 
@@ -137,7 +136,7 @@ router.get('/next/:session_id', authMiddleware, requireSessionAccess(), async (r
 // Get the ordered list of previously-answered questions along the DAG path
 // actually taken — used by the client to rebuild its "Go Back" history stack
 // on mount (e.g. after returning from the documents/vitals pages).
-router.get('/history/:session_id', authMiddleware, requireSessionAccess(), async (req, res) => {
+router.get('/history/:session_id', authMiddleware, requireSessionOwnership('session_id'), async (req, res) => {
   try {
     const { session_id } = req.params;
 
@@ -231,8 +230,9 @@ router.post('/rewind', authMiddleware, async (req, res) => {
   }
 });
 
-// Get all answers for a session
-router.get('/answers/:session_id', authMiddleware, requireSessionAccess(), async (req, res) => {
+// Get all answers for a session (free-text symptom PHI) — own session (patient)
+// or any (clinician) (§5c).
+router.get('/answers/:session_id', authMiddleware, requireSessionOwnership('session_id'), async (req, res) => {
   try {
     const result = await pool.query(
       'SELECT * FROM session_answers WHERE session_id = $1 ORDER BY created_at',

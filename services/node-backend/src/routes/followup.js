@@ -5,13 +5,15 @@ const { authMiddleware, requireRole } = require('../middleware/auth');
 
 const router = Router();
 
-// Clinical staff only. POST in particular accepts an arbitrary phone number and
-// message body which the follow-up worker then dispatches through Twilio — while
-// unauthenticated it was an open SMS/WhatsApp relay billed to this deployment.
-const clinicalOnly = [authMiddleware, requireRole('doctor', 'admin')];
+// Every route here is clinician-facing (§5a). Nothing in the patient flow calls
+// them: listing joins patient_name + phone, scheduling sends a message to an
+// arbitrary number, and /respond writes a clinical response. If patient-initiated
+// follow-up replies are wired up later (e.g. from the WhatsApp webhook), they
+// should go through the webhook handler, not this route.
+const clinicianOnly = [authMiddleware, requireRole('doctor', 'admin')];
 
 // List follow-ups (optionally filter by status)
-router.get('/', ...clinicalOnly, async (req, res) => {
+router.get('/', ...clinicianOnly, async (req, res) => {
   try {
     const { status, phone } = req.query;
     let sql = 'SELECT f.*, s.patient_name, s.department FROM scheduled_followups f JOIN sessions s ON f.session_id = s.id';
@@ -33,7 +35,7 @@ router.get('/', ...clinicalOnly, async (req, res) => {
 });
 
 // Schedule a follow-up manually
-router.post('/', ...clinicalOnly, async (req, res) => {
+router.post('/', ...clinicianOnly, async (req, res) => {
   try {
     const { session_id, protocol_id, patient_phone, message, send_at, channel } = req.body;
     if (!session_id || !patient_phone || !message || !send_at) {
@@ -51,7 +53,7 @@ router.post('/', ...clinicalOnly, async (req, res) => {
 });
 
 // Record patient response to a follow-up
-router.post('/:id/respond', ...clinicalOnly, async (req, res) => {
+router.post('/:id/respond', ...clinicianOnly, async (req, res) => {
   try {
     const { response } = req.body;
     const responseLower = (response || '').toLowerCase();
