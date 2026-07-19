@@ -1238,6 +1238,13 @@ function QuestionsManager({ depts = [] }) {
 
   useEffect(() => { loadQuestions(); }, [dept]);
 
+  // Default to the first real department instead of a hard-coded "CARD" (which may
+  // not exist) — otherwise the list queries a missing department and looks empty.
+  useEffect(() => {
+    const active = depts.filter(d => d.is_active);
+    if (active.length && !active.some(d => d.code === dept)) setDept(active[0].code);
+  }, [depts]);
+
   async function loadQuestions() {
     // TERMINAL nodes are vestigial DAG sinks, not real questions — the patient's
     // "done" is the /patient/done page. Hide them from the editor list.
