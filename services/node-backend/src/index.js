@@ -1,3 +1,6 @@
+// Error tracking first — initialises Sentry before the rest of the app loads (no-op
+// unless SENTRY_DSN is set). See utils/errorTracking.js.
+require('./utils/errorTracking');
 const express = require('express');
 const cors = require('cors');
 const pool = require('./models/db');
@@ -61,6 +64,7 @@ app.use('/api/whatsapp', require('./routes/whatsapp'));
 app.use('/api/prescription', require('./routes/prescription'));
 app.use('/api/followup', require('./routes/followup'));
 app.use('/api/analytics', require('./routes/analytics'));
+app.use('/api/tickets', require('./routes/tickets'));
 app.use('/his', require('./routes/mock-his'));
 
 // Seed questionnaire data on startup.

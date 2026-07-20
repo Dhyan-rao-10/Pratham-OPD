@@ -71,6 +71,14 @@ export const api = {
   updateQuestion: (id, data) => apiFetch(`/api/admin/questions/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteQuestion: (id) => apiFetch(`/api/admin/questions/${id}`, { method: 'DELETE' }),
   reorderQuestions: (items) => apiFetch('/api/admin/questions/reorder', { method: 'POST', body: JSON.stringify({ items }) }),
+  publishQuestions: (department) => apiFetch('/api/admin/questions/publish', { method: 'POST', body: JSON.stringify({ department }) }),
+  discardDraft: (department) => apiFetch('/api/admin/questions/discard', { method: 'POST', body: JSON.stringify({ department }) }),
+
+  // Report tickets (doctor flags a systemic issue to HIS)
+  createTicket: (data) => apiFetch('/api/tickets', { method: 'POST', body: JSON.stringify(data) }),
+  getTickets: (status) => apiFetch(`/api/tickets${status ? `?status=${status}` : ''}`),
+  getTicketCount: () => apiFetch('/api/tickets/count'),
+  updateTicket: (id, data) => apiFetch(`/api/tickets/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
 
   // Vitals
   submitVitals: (sessionId, data) => apiFetch(`/api/vitals/${sessionId}`, { method: 'POST', body: JSON.stringify(data) }),
